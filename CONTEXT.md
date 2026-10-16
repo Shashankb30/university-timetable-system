@@ -1,9 +1,9 @@
 # CONTEXT.md: University Timetable Generation System (handoff file)
 
 > **How to use:** start a new chat, attach this file (plus the `sql/` files if you
-> have them), and say: *"Read CONTEXT.md. Continue from Step 3."*
+> have them), and say: *"Read CONTEXT.md. Continue from Step 4."*
 > You can also copy it to `CLAUDE.md` if you use Claude Code in this folder.
-> Last updated after **Step 2 complete**.
+> Last updated after **Step 3 complete**.
 
 ---
 
@@ -50,20 +50,63 @@ project/
 | 0 | Understanding summary | Done |
 | 1 | MySQL schema + migration + views + procedures | **Done, tested on MySQL 8.0** |
 | 2 | Seed data (`03_seed_data.sql`) | **Done, tested** |
-| 3 | Timetable generator (`src/generator.py`, plus `db.py`, `utils.py`) | **Next** |
-| 4 | Neo4j layer (ETL, constraints, 8+ Cypher queries, Python wrappers) | Todo |
+| 3 | Timetable generator (`src/generator.py`, `db.py`, `utils.py`) | **Done, tested on MySQL 8.0** |
+| 4 | Neo4j layer (ETL, constraints, 8+ Cypher queries, Python wrappers) | **Next** |
 | 5 | Streamlit app | Todo |
 | 6 | Tooling: docker-compose, requirements, .env.example, tests, README, final checklist | Todo |
 
 Files delivered so far: `sql/01_schema.sql`, `sql/02_migration_improvements.sql`,
-`sql/03_seed_data.sql`, `sql/04_views_procedures.sql`, `tools/make_seed.py`.
+`sql/03_seed_data.sql`, `sql/04_views_procedures.sql`, `tools/make_seed.py`, `src/db.py`, `src/utils.py`, `src/generator.py`.
 
 ## 5. User environment (important)
+- Linux; the local `mysql` command is actually **MariaDB's** client (prints "Deprecated program name").
+- Root login uses socket auth: run `sudo mariadb < file.sql` (**no password** works for root).
+- SQL files for Steps 1 and 2 are **already loaded** in the user's local MariaDB (database `university_timetable`).
+  Other unrelated databases exist there; never touch them.
+- Steps 1-3 were developed/tested on MySQL 8.0 AND **confirmed working on the user's MariaDB**: all SQL files load, the seed loads
+  (20/120/600 counts), and the generator placed 154/154 periods and saved 154 rows; `sp_list_clashes` and `sp_hours_coverage` return nothing.
+  Stay compatible with both where cheap.
 - Load files with the **CLI client**, not the Python connector: `02` and `04` use `DELIMITER`.
-- Python needs a non-root DB user. The user was told to create one (`timetable`@`localhost`, ALL on `university_timetable.*`).
+- Python uses the non-root DB user **`timetable`@`localhost`** (ALL on `university_timetable.*`), **already created** on the user's MariaDB.
   Credentials go in `.env` (variables like `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DATABASE`,
   `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`, `ACADEMIC_YEAR`). **Never store the password in this file.**
 - Step 6 will give Docker (real MySQL 8 + Neo4j 5). Docker availability on the user's machine is unconfirmed.
+
+## 5b. Step 3 deliverables: what exists and how it behaves
+- `src/db.py`: `connect()`, `connection()` (context manager), `query(conn, sql, params)` -> list of dicts,
+  `call_procedure(conn, name, args)`, `transaction(conn)`. Env: `MYSQL_HOST` (127.0.0.1), `MYSQL_PORT` (3306), `MYSQL_USER`,
+  `MYSQL_PASSWORD`, `MYSQL_DATABASE` (university_timetable), optional `MYSQL_UNIX_SOCKET`. Loads `.env` via `utils.load_env()`
+  (own tiny loader; no python-dotenv).
+- `src/utils.py`: `load_env`, `env`, `academic_year()` (env `ACADEMIC_YEAR`, default 2026-2027), `describe_mysql_error`,
+  `build_slot_links` (next/prev period; a gap >= 30 min such as lunch breaks "consecutive"),
+  `build_conflict_graph(conn)` -> `{course: {other: shared_count}}` where
+  **shared_count = #shared qualified faculty (Teaches) + #shared enrolled students (Enrollment)**.
+  **Step 4's Neo4j `CONFLICTS_WITH {shared_count}` must use this same definition.**
+- `src/generator.py`: `generate_timetable(year, replace, allow_partial, dry_run, time_limit, max_nodes, restarts, seed, conn)`
+  -> `GenerationResult` (`.report()`, `.success`, `.rows`, `.unplaced`, `.preflight`, `.soft`). Also reusable: `Problem`,
+  `make_tasks`, `Scheduler`, `evaluate_soft`, `save_timetable`.
+  CLI: `python src/generator.py [--year Y] [--replace] [--allow-partial] [--dry-run] [--time-limit S] [--max-nodes N] [--restarts N] [--seed N]`
+  (exit code 0 = complete and saved/dry-run OK, 1 otherwise).
+- Behaviour: refuses to overwrite an existing year unless `--replace`; saves in one transaction (rollback on any MySQL error,
+  with plain-English reason); incomplete result is NOT saved unless `--allow-partial`; pre-flight explains impossible input;
+  search = greedy most-constrained-first + backtracking + randomised restarts; lab blocks (<=3 periods) never straddle lunch,
+  with a flagged non-consecutive fallback.
+- Verified on seed: 154/154 periods placed, 144 search nodes, ~0.2 s, 0 same-day repeats, 0 faculty runs > 3, 0 split labs;
+  `sp_list_clashes` and `sp_hours_coverage` both return zero rows; average room utilisation 12.8%.
+  Failure paths verified: no teacher (pre-flight), faculty pool too small (pre-flight), rooms too small (search fails ->
+  partial 116/154 with per-course diagnosis), save errors (1062 / trigger 5002 / FK fk_tt_teaches) roll back cleanly.
+- Generator also confirmed on the user's MariaDB (see Confirmed local setup).
+- DB constraint reminder: the composite FK `fk_tt_teaches` blocks deleting a `Teaches` row that a saved timetable uses; clear
+  `Timetable` first (or re-run `03_seed_data.sql`, which truncates everything).
+
+### Local setup: shawshank's machine only (teammate uses plain MySQL 8.0.16+, so `mysql -u root -p < file.sql` and none of this applies to him)
+- User's shell is **fish**: give fish syntax for shell commands (`set -x VAR value`, not `export`).
+- Python runs from a **`uv` venv (Python 3.12) at `.venv`**; the system Python is broken, so install packages with `uv pip install`.
+- DB user **`timetable`@`localhost`** already exists. Step 6 should provide a `.env` so env vars needn't be set by hand.
+- Local DB server is **MariaDB** (load SQL with `sudo mariadb`), likely on port 3306. Step 6's Docker MySQL must use a different host port
+  (e.g. 3307) to avoid a clash; keep SQL/Python compatible with both MariaDB and MySQL 8.
+- Docker/Neo4j availability is **unconfirmed**; if no Docker, give a non-Docker Neo4j install route.
+- The user's parent folder path contains a space (`Uni timetable`), so quote paths in commands.
 
 ## 6. Schema (from the PDF, source of truth)
 Tables and columns (names must not change):
@@ -127,7 +170,7 @@ Student M:N Course; Timetable is the n-ary "Scheduled_In" relationship.
 
 ## 11. Remaining steps: full requirements
 
-### Step 3: Timetable generator (`src/generator.py`; also `src/db.py`, `src/utils.py`)
+### Step 3: Timetable generator: DONE (requirements kept for reference)
 Reads from MySQL, inserts into `Timetable`.
 - **Hard:** no room/faculty/section double-booked in a slot; room type and capacity match; faculty only teaches courses in
   `Teaches`; each course gets exactly `weekly_hours` slots per week **per section** (use `Section_Course`).
@@ -159,3 +202,7 @@ classes + suggested substitutes); clash checker; basic statistics charts.
 ETL counts match MySQL), and `README.md` containing: exact setup/run commands (start containers, load SQL, run ETL, run
 generator, launch UI), the ER-to-schema explanation, and a short "why MySQL + Neo4j" section. End with the **verification checklist**.
 
+## 12. Notes for the next session
+- The user is on Linux with MariaDB locally. Step 6's README should show both the Docker path (preferred) and a
+  local-MariaDB path (`sudo mariadb < file.sql`), and mention the `DELIMITER` caveat.
+- When loading SQL from Python (tests/setup), shell out to the `mysql`/`mariadb` client or split on `DELIMITER` yourself.
