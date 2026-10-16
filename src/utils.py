@@ -1,0 +1,168 @@
+"""
+utils.py -- helpers shared by the generator, ETL, queries, tests and UI.
+
+  * load_env / env / academic_year   configuration from environment / .env
+  * describe_mysql_error             turn MySQL errors into plain English
+  * build_slot_links                 "which period follows which" (breaks aware)
+  * build_conflict_graph             course-vs-course conflict weights
+"""
+from __future__ import annotations
+
+import os
+import re
+from collections import defaultdict
+from datetime import time, timedelta
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DAY_ORDER = ["MON", "TUE", "WED", "THU", "FRI", "SAT"]
+DEFAULT_ACADEMIC_YEAR = "2026-2027"
+
+
+# --------------------------------------------------------------------------
+# Configuration
+# --------------------------------------------------------------------------
+def load_env(path: str | os.PathLike | None = None) -> None:
+    """
+    Minimal .env loader (KEY=VALUE per line, '#' comments). Values already
+    present in the real environment win, so `export` and docker-compose can
+    override the file. Avoids an extra dependency (python-dotenv).
+    """
+    env_file = Path(path) if path else PROJECT_ROOT / ".env"
+    if not env_file.is_file():
+        return
+    for raw in env_file.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        value = value.strip().strip('"').strip("'")
+        os.environ.setdefault(key.strip(), value)
+
+
+def env(name: str, default: str | None = None) -> str | None:
+    load_env()
+    return os.environ.get(name, default)
+
+
+def academic_year() -> str:
+    """Academic year used by default (env ACADEMIC_YEAR, else 2026-2027)."""
+    return env("ACADEMIC_YEAR", DEFAULT_ACADEMIC_YEAR)
+
+
+# --------------------------------------------------------------------------
+# MySQL error translation
+# --------------------------------------------------------------------------
+_UNIQUE_MEANING = {
+    "uq_room_slot": "that room is already booked in that slot",
+    "uq_faculty_slot": "that faculty member already teaches in that slot",
+    "uq_section_slot": "that section already has a class in that slot",
+}
+_FK_MEANING = {
+    "fk_tt_teaches": "the faculty member is not listed in Teaches for that course",
+    "fk_tt_section_course": "that course is not in the section's Section_Course plan",
+    "fk_tt_course": "unknown course",
+    "fk_tt_faculty": "unknown faculty",
+    "fk_tt_room": "unknown room",
+    "fk_tt_slot": "unknown time slot",
+    "fk_tt_section": "unknown section",
+}
+_TRIGGER_MEANING = {
+    5001: "room capacity is smaller than the section strength",
+    5002: "course type does not match the room type (LAB->LAB, THEORY->LECTURE)",
+    5003: "Section_Course.semester does not match Section.semester",
+}
+
+
+def describe_mysql_error(exc: BaseException) -> str:
+    """Human-readable explanation of a mysql.connector error."""
+    errno = getattr(exc, "errno", None)
+    msg = str(getattr(exc, "msg", None) or exc)
+    if errno == 1062:                       # duplicate key -> a UNIQUE clash
+        m = re.search(r"for key '([^']+)'", msg)
+        key = m.group(1).split(".")[-1] if m else "?"
+        return f"clash ({key}): {_UNIQUE_MEANING.get(key, 'duplicate row')}"
+    if errno == 1452:                       # FK failure
+        m = re.search(r"CONSTRAINT `([^`]+)`", msg)
+        name = m.group(1) if m else "?"
+        return f"foreign key {name}: {_FK_MEANING.get(name, 'referenced row missing')}"
+    if errno in _TRIGGER_MEANING:
+        return f"rule {errno}: {_TRIGGER_MEANING[errno]}"
+    return f"MySQL error {errno}: {msg}"
+
+
+# --------------------------------------------------------------------------
+# Time-slot geometry
+# --------------------------------------------------------------------------
+def to_minutes(t) -> float:
+    """TIME columns arrive as timedelta (mysql-connector) or datetime.time."""
+    if isinstance(t, timedelta):
+        return t.total_seconds() / 60.0
+    if isinstance(t, time):
+        return t.hour * 60 + t.minute + t.second / 60.0
+    raise TypeError(f"unsupported time value: {t!r}")
+
+
+def fmt_time(t) -> str:
+    m = int(round(to_minutes(t)))
+    return f"{m // 60:02d}:{m % 60:02d}"
+
+
+def build_slot_links(slots: list[dict], long_break_min: float = 30.0):
+    """
+    Return (next_slot, prev_slot): slot_id -> slot_id of the period that
+    directly follows/precedes it ON THE SAME DAY WITHOUT A LONG BREAK.
+
+    Two periods are "consecutive" when period_no differs by 1 and the gap
+    between end and next start is < long_break_min. With the seed data the
+    15-minute tea breaks keep periods linked, the 55-minute lunch (P4->P5)
+    does not. Lab blocks and the "max 3 consecutive periods" rule use this.
+    """
+    by_day: dict[str, list[dict]] = defaultdict(list)
+    for s in slots:
+        by_day[s["day_of_week"]].append(s)
+    nxt: dict[int, int] = {}
+    prv: dict[int, int] = {}
+    for day_slots in by_day.values():
+        day_slots.sort(key=lambda s: s["period_no"])
+        for a, b in zip(day_slots, day_slots[1:]):
+            gap = to_minutes(b["start_time"]) - to_minutes(a["end_time"])
+            if b["period_no"] == a["period_no"] + 1 and gap < long_break_min:
+                nxt[a["slot_id"]] = b["slot_id"]
+                prv[b["slot_id"]] = a["slot_id"]
+    return nxt, prv
+
+
+# --------------------------------------------------------------------------
+# Conflict graph
+# --------------------------------------------------------------------------
+def build_conflict_graph(conn) -> dict[str, dict[str, int]]:
+    """
+    Course conflict graph: course -> {other_course: shared_count}.
+
+    Two courses CONFLICT when they cannot sensibly share a time slot because
+    the same people are involved:
+        shared_count = (# faculty qualified for both, from Teaches)
+                     + (# students enrolled in both, from Enrollment)
+    Undirected: stored both ways. The Neo4j layer (Step 4) materialises the
+    same definition as CONFLICTS_WITH {shared_count}.
+
+    The generator uses it to order tasks (courses with many heavy conflicts
+    are placed first, i.e. DSATUR-style "most constrained first").
+    """
+    graph: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    sql_pairs = (
+        "SELECT a.course_id AS c1, b.course_id AS c2, COUNT(*) AS n "
+        "FROM {t} a JOIN {t} b ON a.{k} = b.{k} AND a.course_id < b.course_id "
+        "GROUP BY a.course_id, b.course_id"
+    )
+    cur = conn.cursor()
+    try:
+        for table, key in (("Teaches", "faculty_id"), ("Enrollment", "student_id")):
+            cur.execute(sql_pairs.format(t=table, k=key))
+            for c1, c2, n in cur.fetchall():
+                graph[c1][c2] += int(n)
+                graph[c2][c1] += int(n)
+    finally:
+        cur.close()
+    return {c: dict(nb) for c, nb in graph.items()}
