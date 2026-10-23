@@ -1,9 +1,9 @@
 # CONTEXT.md: University Timetable Generation System (handoff file)
 
 > **How to use:** start a new chat, attach this file (plus the `sql/` files if you
-> have them), and say: *"Read CONTEXT.md. Continue from Step 4."*
+> have them), and say: *"Read CONTEXT.md. Continue from Step 5."*
 > You can also copy it to `CLAUDE.md` if you use Claude Code in this folder.
-> Last updated after **Step 3 complete**.
+> Last updated after **Step 4 complete**.
 
 ---
 
@@ -51,12 +51,13 @@ project/
 | 1 | MySQL schema + migration + views + procedures | **Done, tested on MySQL 8.0** |
 | 2 | Seed data (`03_seed_data.sql`) | **Done, tested** |
 | 3 | Timetable generator (`src/generator.py`, `db.py`, `utils.py`) | **Done, tested on MySQL 8.0** |
-| 4 | Neo4j layer (ETL, constraints, 8+ Cypher queries, Python wrappers) | **Next** |
-| 5 | Streamlit app | Todo |
+| 4 | Neo4j layer (ETL, constraints, 12 Cypher queries, Python wrappers) | **Done, verified on the user's live Neo4j 5.26.0** (see 5c) |
+| 5 | Streamlit app | **Next** |
 | 6 | Tooling: docker-compose, requirements, .env.example, tests, README, final checklist | Todo |
 
 Files delivered so far: `sql/01_schema.sql`, `sql/02_migration_improvements.sql`,
-`sql/03_seed_data.sql`, `sql/04_views_procedures.sql`, `tools/make_seed.py`, `src/db.py`, `src/utils.py`, `src/generator.py`.
+`sql/03_seed_data.sql`, `sql/04_views_procedures.sql`, `tools/make_seed.py`, `src/db.py`, `src/utils.py`, `src/generator.py`, `cypher/constraints.cypher`, `cypher/queries.cypher`,
+`src/neo4j_etl.py`, `src/neo4j_queries.py`, `.gitignore`.
 
 ## 5. User environment (important)
 - Linux; the local `mysql` command is actually **MariaDB's** client (prints "Deprecated program name").
@@ -100,13 +101,56 @@ Files delivered so far: `sql/01_schema.sql`, `sql/02_migration_improvements.sql`
   `Timetable` first (or re-run `03_seed_data.sql`, which truncates everything).
 
 ### Local setup: shawshank's machine only (teammate uses plain MySQL 8.0.16+, so `mysql -u root -p < file.sql` and none of this applies to him)
-- User's shell is **fish**: give fish syntax for shell commands (`set -x VAR value`, not `export`).
+- User switches between **fish** and plain **`sh`** (VS Code terminal), so shell syntax for env vars is unreliable. **Put settings in the project-root `.env`**
+  (read by `utils.load_env()` in every shell); avoid `export` / `set -x` in instructions. `uv` is at `~/.local/bin/uv` and may not be on PATH in `sh`.
 - Python runs from a **`uv` venv (Python 3.12) at `.venv`**; the system Python is broken, so install packages with `uv pip install`.
 - DB user **`timetable`@`localhost`** already exists. Step 6 should provide a `.env` so env vars needn't be set by hand.
 - Local DB server is **MariaDB** (load SQL with `sudo mariadb`), likely on port 3306. Step 6's Docker MySQL must use a different host port
   (e.g. 3307) to avoid a clash; keep SQL/Python compatible with both MariaDB and MySQL 8.
 - Docker/Neo4j availability is **unconfirmed**; if no Docker, give a non-Docker Neo4j install route.
 - The user's parent folder path contains a space (`Uni timetable`), so quote paths in commands.
+
+## 5c. Step 4 deliverables: Neo4j layer
+**Status: VERIFIED on the user's live Neo4j 5.26.0 (Java 21, tarball install, no Docker).** The ETL ran clean (15 constraint/index statements,
+all nodes and relationships, `Verification: OK, graph matches MySQL`), a second run gave identical counts (idempotent), and
+`python src/neo4j_queries.py demo` executed all queries; results were spot-checked against the data (e.g. CS301 vs CS302 shared_count 25 =
+24 students + 1 faculty; Q6 path faculty 1 -> 11 is 6 hops via TEACHES_SECTION and TEACHES). Offline checks before that: `cypher-lint` on
+all queries/ETL statements, fake-session ETL test, wrapper-parameter check. Needs Neo4j >= 5.7 (5.26 LTS recommended).
+Diagnostics: `python src/neo4j_queries.py check` prints which NEO4J_* settings are used (password masked; says if a real env var overrides `.env`) and tests login.
+A harmless server notice 01G11 ("null value eliminated in set function", from count()/collect() over OPTIONAL MATCH) is filtered in `utils.get_neo4j_driver()`.
+Lessons from setup: a fresh Neo4j has password `neo4j` (browser forces a change); `set-initial-password` only works while Neo4j is STOPPED and before
+first start (reset: `bin/neo4j stop`, `rm -rf data/databases data/transactions`, set-initial-password, start). `.env` must match.
+
+- **Graph model.** Nodes: Department (+`dept_code` e.g. CSE), Faculty, Course, Section (+`label` e.g. "CSE Sem 3 A"), Student, Classroom,
+  TimeSlot (+`day_no` 1-6). Relationships: WORKS_IN, TEACHES (qualified), STUDIES_IN, ENROLLED_IN, OFFERED_BY,
+  **SCHEDULED_IN `(Course)->(Section)`** (one per Timetable row; props timetable_id, academic_year, course_id, section_id, faculty_id,
+  faculty_name, room_id, room_label, slot_id, day_of_week, day_no, period_no, start_time, end_time), **CONFLICTS_WITH** (Course-Course, stored once
+  per pair a<b; props shared_faculty, shared_students, shared_count). **Flagged extras:** BELONGS_TO (Section->Department),
+  TAKES (Section->Course, from Section_Course), TEACHES_SECTION (Faculty->Section, derived from the timetable; used so Q6 can path "through shared sections").
+- **Design choices.** Room/slot/faculty are PROPERTIES of SCHEDULED_IN (brief: "carrying room, slot, academic_year"), so free-room /
+  busy-faculty checks are anti-joins on relationship properties. CONFLICTS_WITH is derived inside Neo4j from TEACHES/ENROLLED_IN with the same
+  definition as `utils.build_conflict_graph` (so a test can compare them). Classic Cypher (OPTIONAL MATCH ... WHERE x IS NULL) is used instead of newer EXISTS{}.
+- **`cypher/queries.cypher`** is the single source of truth: `// @query <name>` markers are parsed by `neo4j_queries.load_queries()`. Queries:
+  impact_analysis, substitute_finder, most_conflicted_courses, free_rooms, heaviest_day_students, faculty_shortest_path, faculty_workload,
+  move_class_ripple, cross_department_teaching, course_conflict_neighbours, node_counts, relationship_counts.
+- **`src/neo4j_queries.py`** wrappers: `impact_analysis`, `substitute_finder`, `faculty_absence_plan` (Q1+Q2; per-class status COVERABLE /
+  NEEDS_TEACHES / UNCOVERED + summary; for the UI), `most_conflicted_courses`, `free_rooms(day, period, min_capacity, room_type, year)`,
+  `heaviest_day_students`, `faculty_shortest_path` (-> {connected, hops, path}), `faculty_workload_ranking` (adds dense `rank`),
+  `move_class_ripple` (-> {moved, clashes, free_move, students_displaced}), `cross_department_teaching`, `course_conflict_neighbours`,
+  `node_counts`, `relationship_counts`, plus `get_driver()/close_driver()`. CLI: `python src/neo4j_queries.py list|demo`.
+  Substitutes: QUALIFIED = in Teaches for that course (assignable; FK allows); RELATED = teaches a CONFLICTS_WITH course (needs a Teaches row first).
+- **`src/neo4j_etl.py`**: `run_etl(year=None, reset=False)` (None = all years in Timetable), `expected_counts(conn, years)`,
+  `actual_counts(session)`, `compare_counts(expected, actual)` -> list of mismatches (for Step 6 tests). CLI: `python src/neo4j_etl.py [--year Y] [--reset]`.
+  Rebuilds SCHEDULED_IN / TEACHES_SECTION for the affected year(s) so regenerated timetables leave no ghosts; everything else is MERGE.
+- **Expected counts on the seed + generated timetable:** nodes 3/20/30/10/120/25/48 (Dept/Faculty/Course/Section/Student/Classroom/TimeSlot);
+  WORKS_IN 20, OFFERED_BY 30, BELONGS_TO 10, STUDIES_IN 120, TEACHES 62, ENROLLED_IN 600, TAKES 50, SCHEDULED_IN 154,
+  TEACHES_SECTION 80, CONFLICTS_WITH 91.
+- **Neo4j env vars:** `NEO4J_URI` (default bolt://localhost:7687), `NEO4J_USER` (neo4j), `NEO4J_PASSWORD` (required), `NEO4J_DATABASE` (neo4j).
+  `utils.get_neo4j_driver()`, `utils.neo4j_settings()`, `utils.format_table()`, `utils.DAY_NO` were added.
+- **No Docker on the user's machine.** Neo4j runs from the official tarball (`neo4j-community-5.26.0-unix.tar.gz` from dist.neo4j.org) with
+  **Java 21** (`jre21-openjdk-headless`; Neo4j 5 accepts only Java 17 or 21): `bin/neo4j-admin dbms set-initial-password <pw>`, then `bin/neo4j console`
+  (Browser http://localhost:7474, Bolt 7687). The partial-upgrade glibc problem must be fixed (`pacman -Syu`) before Java will run.
+  Step 6 must therefore make Docker OPTIONAL (README: Docker path + tarball path).
 
 ## 6. Schema (from the PDF, source of truth)
 Tables and columns (names must not change):
@@ -181,13 +225,13 @@ Reads from MySQL, inserts into `Timetable`.
 - **Failure handling:** report which course/section could not be placed and why.
 - Wrap inserts in **transactions**; catch MySQL unique-constraint violations.
 
-### Step 4: Neo4j layer (`src/neo4j_etl.py`, `src/neo4j_queries.py`, `cypher/constraints.cypher`, `cypher/queries.cypher`)
+### Step 4: Neo4j layer: DONE (requirements kept for reference)
 - ETL MySQL -> Neo4j: **idempotent (MERGE)**; create uniqueness constraints and indexes **first**.
 - Nodes: Department, Faculty, Course, Section, Student, Classroom, TimeSlot.
 - Relationships: `WORKS_IN`, `TEACHES`, `STUDIES_IN`, `ENROLLED_IN`, `OFFERED_BY`,
   `SCHEDULED_IN` (carries room, slot, academic_year), and derived `CONFLICTS_WITH` between courses that share faculty or
   students (property `shared_count`).
-- **At least 8 documented Cypher queries**, including: impact analysis if a faculty member is absent; substitute faculty
+- **At least 8 documented Cypher queries** (12 delivered), including: impact analysis if a faculty member is absent; substitute faculty
   finder (same department, related course, free in the slot); courses with the most conflicts; free rooms for a slot by
   capacity and type; students with the heaviest day; shortest path between two faculty through shared courses or sections;
   faculty workload ranking; ripple-effect query for moving one class.

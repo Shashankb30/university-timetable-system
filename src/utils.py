@@ -22,22 +22,29 @@ DEFAULT_ACADEMIC_YEAR = "2026-2027"
 # --------------------------------------------------------------------------
 # Configuration
 # --------------------------------------------------------------------------
-def load_env(path: str | os.PathLike | None = None) -> None:
-    """
-    Minimal .env loader (KEY=VALUE per line, '#' comments). Values already
-    present in the real environment win, so `export` and docker-compose can
-    override the file. Avoids an extra dependency (python-dotenv).
-    """
+def read_env_file(path: str | os.PathLike | None = None) -> dict[str, str]:
+    """Parse a .env file (KEY=VALUE per line, '#' comments) into a dict. Missing file -> {}."""
     env_file = Path(path) if path else PROJECT_ROOT / ".env"
+    values: dict[str, str] = {}
     if not env_file.is_file():
-        return
+        return values
     for raw in env_file.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        value = value.strip().strip('"').strip("'")
-        os.environ.setdefault(key.strip(), value)
+        values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+def load_env(path: str | os.PathLike | None = None) -> None:
+    """
+    Minimal .env loader. Values already present in the real environment win,
+    so `export` and docker-compose can override the file. Avoids an extra
+    dependency (python-dotenv).
+    """
+    for key, value in read_env_file(path).items():
+        os.environ.setdefault(key, value)
 
 
 def env(name: str, default: str | None = None) -> str | None:
@@ -166,3 +173,115 @@ def build_conflict_graph(conn) -> dict[str, dict[str, int]]:
     finally:
         cur.close()
     return {c: dict(nb) for c, nb in graph.items()}
+
+
+# --------------------------------------------------------------------------
+# Neo4j connection settings (shared by neo4j_etl.py / neo4j_queries.py / UI)
+# --------------------------------------------------------------------------
+DAY_NO = {d: i + 1 for i, d in enumerate(DAY_ORDER)}     # MON=1 ... SAT=6
+
+
+def neo4j_settings() -> dict:
+    """
+    Neo4j settings from the environment (or .env):
+        NEO4J_URI       default bolt://localhost:7687
+        NEO4J_USER      default neo4j
+        NEO4J_PASSWORD  required
+        NEO4J_DATABASE  default neo4j  (Community Edition has only this one)
+    """
+    load_env()
+    return {
+        "uri": os.environ.get("NEO4J_URI", "bolt://localhost:7687"),
+        "user": os.environ.get("NEO4J_USER", "neo4j"),
+        "password": os.environ.get("NEO4J_PASSWORD", ""),
+        "database": os.environ.get("NEO4J_DATABASE", "neo4j"),
+    }
+
+
+_notification_filter_installed = False
+
+
+def _silence_null_elimination_notice() -> None:
+    """
+    Neo4j sends warning 01G11 "null value eliminated in set function" whenever
+    count()/collect() skip NULLs coming from an OPTIONAL MATCH. Several queries
+    do that ON PURPOSE (e.g. substitute_finder), so this one notice is dropped.
+    Every other server notification is still shown.
+    """
+    global _notification_filter_installed
+    if _notification_filter_installed:
+        return
+    import logging
+
+    class _Drop01G11(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            return "01G11" not in record.getMessage()
+
+    logging.getLogger("neo4j.notifications").addFilter(_Drop01G11())
+    _notification_filter_installed = True
+
+
+def get_neo4j_driver():
+    """Create a Neo4j driver from the settings above (imported lazily)."""
+    from neo4j import GraphDatabase
+    _silence_null_elimination_notice()
+    s = neo4j_settings()
+    if not s["password"]:
+        raise RuntimeError("NEO4J_PASSWORD is not set. Put it in .env or export it.")
+    return GraphDatabase.driver(s["uri"], auth=(s["user"], s["password"]))
+
+
+# --------------------------------------------------------------------------
+# Small console table printer (keeps the CLI demos free of extra dependencies)
+# --------------------------------------------------------------------------
+def format_table(rows: list[dict], columns: list[str] | None = None,
+                 max_rows: int | None = None) -> str:
+    """Render a list of dicts as an aligned text table."""
+    if not rows:
+        return "(no rows)"
+    cols = columns or list(rows[0].keys())
+
+    def cell(v) -> str:
+        if v is None:
+            return "-"
+        if isinstance(v, (list, tuple)):
+            return ", ".join(cell(x) for x in v) if v else "-"
+        if isinstance(v, dict):
+            return ":".join(str(x) for x in v.values())
+        return str(v)
+
+    shown = rows if max_rows is None else rows[:max_rows]
+    body = [[cell(r.get(c)) for c in cols] for r in shown]
+    widths = [max(len(c), *(len(b[i]) for b in body)) for i, c in enumerate(cols)]
+    line = "  ".join(c.ljust(w) for c, w in zip(cols, widths))
+    out = [line, "  ".join("-" * w for w in widths)]
+    out += ["  ".join(v.ljust(w) for v, w in zip(b, widths)) for b in body]
+    if max_rows is not None and len(rows) > max_rows:
+        out.append(f"... {len(rows) - max_rows} more row(s)")
+    return "\n".join(out)
+
+
+def describe_neo4j_settings(env_path: str | os.PathLike | None = None) -> list[str]:
+    """
+    Human-readable view of the Neo4j settings the code will use, WITHOUT
+    printing the password: its length, first/last character and where it
+    came from (.env file, or a real environment variable overriding .env).
+    """
+    load_env(env_path)
+    s = neo4j_settings()
+    file_vals = read_env_file(env_path)
+    pw = s["password"]
+    if not pw:
+        pw_text = "NOT SET"
+    else:
+        hint = f"{len(pw)} chars, starts '{pw[0]}', ends '{pw[-1]}'"
+        in_file = file_vals.get("NEO4J_PASSWORD")
+        if in_file is None:
+            source = "real environment variable (not in .env)"
+        elif in_file != pw:
+            source = "real environment variable, OVERRIDING a different value in .env"
+        else:
+            source = ".env file"
+        pw_text = f"{hint}  [source: {source}]"
+    return [f"URI       : {s['uri']}", f"User      : {s['user']}",
+            f"Password  : {pw_text}", f"Database  : {s['database']}"]
