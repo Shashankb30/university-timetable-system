@@ -44,8 +44,8 @@ def read_statements(path: str | Path) -> list[str]:
 
 
 def dept_code(name: str) -> str:
-    """'Computer Science and Engineering' -> 'CSE' (initials of capitalised words)."""
-    return "".join(w[0] for w in name.split() if w[0].isupper())
+    """'Computer Science and Engineering' -> 'CSE' (shared helper in utils)."""
+    return utils.dept_code(name)
 
 
 def _write(session, cypher: str, **params) -> None:

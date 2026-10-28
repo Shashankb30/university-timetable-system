@@ -107,6 +107,10 @@ def to_minutes(t) -> float:
         return t.total_seconds() / 60.0
     if isinstance(t, time):
         return t.hour * 60 + t.minute + t.second / 60.0
+    if isinstance(t, str):                        # 'HH:MM' or 'HH:MM:SS'
+        parts = [float(x) for x in t.split(":")]
+        parts += [0.0] * (3 - len(parts))
+        return parts[0] * 60 + parts[1] + parts[2] / 60.0
     raise TypeError(f"unsupported time value: {t!r}")
 
 
@@ -285,3 +289,81 @@ def describe_neo4j_settings(env_path: str | os.PathLike | None = None) -> list[s
         pw_text = f"{hint}  [source: {source}]"
     return [f"URI       : {s['uri']}", f"User      : {s['user']}",
             f"Password  : {pw_text}", f"Database  : {s['database']}"]
+
+
+# --------------------------------------------------------------------------
+# Department code and weekly-grid helpers (used by the Streamlit UI)
+# --------------------------------------------------------------------------
+def dept_code(name: str) -> str:
+    """'Computer Science and Engineering' -> 'CSE' (initials of capitalised words)."""
+    return "".join(w[0] for w in name.split() if w[0].isupper())
+
+
+def build_week_grid(slots: list[dict], classes: list[dict], break_min: float = 30.0) -> dict:
+    """
+    Arrange classes into a weekly grid.
+
+    slots   : TimeSlot rows (day_of_week, period_no, start_time, end_time)
+    classes : dicts with day_of_week, period_no, course_id, course_type, lines (list[str])
+    Returns {"days": [...], "rows": [row, ...]} where each row is
+        {"kind": "period", "label": "P1", "sub": "08:30 - 09:20", "cells": {day: [class, ...]}}
+    or  {"kind": "break",  "label": "Lunch", "sub": "12:05 - 13:00", "cells": {}}
+    A break row is inserted wherever the gap between two periods is >= break_min
+    minutes (the 15-minute tea breaks are not shown; lunch is).
+    """
+    days = [d for d in DAY_ORDER if any(s["day_of_week"] == d for s in slots)]
+    periods: dict[int, dict] = {}
+    for s in slots:
+        periods.setdefault(s["period_no"], s)
+    cells: dict[tuple, list] = defaultdict(list)
+    for c in classes:
+        cells[(c["day_of_week"], c["period_no"])].append(c)
+    rows, prev = [], None
+    for p in sorted(periods):
+        s = periods[p]
+        if prev is not None:
+            gap = to_minutes(s["start_time"]) - to_minutes(prev["end_time"])
+            if gap >= break_min:
+                rows.append({"kind": "break", "label": "Lunch" if gap >= 45 else "Break",
+                             "sub": f"{fmt_time(prev['end_time'])} - {fmt_time(s['start_time'])}",
+                             "cells": {}})
+        rows.append({"kind": "period", "label": f"P{p}",
+                     "sub": f"{fmt_time(s['start_time'])} - {fmt_time(s['end_time'])}",
+                     "cells": {d: cells.get((d, p), []) for d in days}})
+        prev = s
+    return {"days": days, "rows": rows}
+
+
+_TYPE_STYLE = {   # translucent colours so it works in both light and dark themes
+    "THEORY": ("rgba(66,135,245,0.20)", "#4287f5"),
+    "LAB": ("rgba(245,158,11,0.24)", "#f59e0b"),
+}
+
+
+def grid_to_html(grid: dict) -> str:
+    """Render build_week_grid() output as an HTML table (all text HTML-escaped)."""
+    from html import escape
+    cell_css = "border:1px solid rgba(128,128,128,.35);padding:6px;vertical-align:top;"
+    out = ['<table style="border-collapse:collapse;width:100%;table-layout:fixed;font-size:0.8rem;">',
+           "<tr>" + f'<th style="{cell_css}width:92px;">Period</th>'
+           + "".join(f'<th style="{cell_css}">{escape(d)}</th>' for d in grid["days"]) + "</tr>"]
+    for row in grid["rows"]:
+        head = (f'<td style="{cell_css}"><b>{escape(row["label"])}</b><br>'
+                f'<span style="opacity:.7">{escape(row["sub"])}</span></td>')
+        if row["kind"] == "break":
+            out.append(f'<tr>{head}<td colspan="{len(grid["days"])}" style="{cell_css}'
+                       f'text-align:center;opacity:.55;">{escape(row["label"])}</td></tr>')
+            continue
+        tds = []
+        for d in grid["days"]:
+            blocks = []
+            for c in row["cells"][d]:
+                bg, bar = _TYPE_STYLE.get(c.get("course_type"), _TYPE_STYLE["THEORY"])
+                lines = [escape(str(x)) for x in c["lines"]]
+                body = f"<b>{lines[0]}</b>" + "".join(f"<br>{x}" for x in lines[1:])
+                blocks.append(f'<div style="background:{bg};border-left:4px solid {bar};'
+                              f'padding:4px 6px;border-radius:4px;margin:2px 0;">{body}</div>')
+            tds.append(f'<td style="{cell_css}">{"".join(blocks) or "&nbsp;"}</td>')
+        out.append(f"<tr>{head}{''.join(tds)}</tr>")
+    out.append("</table>")
+    return "".join(out)

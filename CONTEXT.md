@@ -1,9 +1,9 @@
 # CONTEXT.md: University Timetable Generation System (handoff file)
 
 > **How to use:** start a new chat, attach this file (plus the `sql/` files if you
-> have them), and say: *"Read CONTEXT.md. Continue from Step 5."*
+> have them), and say: *"Read CONTEXT.md. Continue from Step 6."*
 > You can also copy it to `CLAUDE.md` if you use Claude Code in this folder.
-> Last updated after **Step 4 complete**.
+> Last updated after **Step 5 complete**.
 
 ---
 
@@ -52,12 +52,12 @@ project/
 | 2 | Seed data (`03_seed_data.sql`) | **Done, tested** |
 | 3 | Timetable generator (`src/generator.py`, `db.py`, `utils.py`) | **Done, tested on MySQL 8.0** |
 | 4 | Neo4j layer (ETL, constraints, 12 Cypher queries, Python wrappers) | **Done, verified on the user's live Neo4j 5.26.0** (see 5c) |
-| 5 | Streamlit app | **Next** |
-| 6 | Tooling: docker-compose, requirements, .env.example, tests, README, final checklist | Todo |
+| 5 | Streamlit app (`app/streamlit_app.py`) | **Done**, tested headlessly (see 5d); not yet seen in the user's browser |
+| 6 | Tooling: docker-compose, requirements, .env.example, tests, README, final checklist | **Next** |
 
 Files delivered so far: `sql/01_schema.sql`, `sql/02_migration_improvements.sql`,
 `sql/03_seed_data.sql`, `sql/04_views_procedures.sql`, `tools/make_seed.py`, `src/db.py`, `src/utils.py`, `src/generator.py`, `cypher/constraints.cypher`, `cypher/queries.cypher`,
-`src/neo4j_etl.py`, `src/neo4j_queries.py`, `.gitignore`.
+`src/neo4j_etl.py`, `src/neo4j_queries.py`, `.gitignore`, `app/streamlit_app.py`.
 
 ## 5. User environment (important)
 - Linux; the local `mysql` command is actually **MariaDB's** client (prints "Deprecated program name").
@@ -152,6 +152,27 @@ first start (reset: `bin/neo4j stop`, `rm -rf data/databases data/transactions`,
   (Browser http://localhost:7474, Bolt 7687). The partial-upgrade glibc problem must be fixed (`pacman -Syu`) before Java will run.
   Step 6 must therefore make Docker OPTIONAL (README: Docker path + tarball path).
 
+## 5d. Step 5 deliverables: Streamlit app
+Run from the project root: `streamlit run app/streamlit_app.py` (needs `streamlit` + `pandas` in the venv: `~/.local/bin/uv pip install streamlit pandas`;
+tested with Streamlit 1.66.1 / pandas 3.0.2). Reads MySQL via `db.py`; Neo4j is optional per page. Sidebar: academic year, page, MySQL/Neo4j status.
+- **Timetable**: weekly grid per Section / Faculty / Room (HTML table from `utils.build_week_grid` + `utils.grid_to_html`; theory blue, lab orange,
+  lunch row, all text HTML-escaped), metrics, CSV download. Uses view `v_section_timetable` (has faculty_id, room_id, section_id) for all three views.
+- **Run generator**: calls `generator.generate_timetable` with replace / allow-partial / dry-run / time limit / seed; shows verdict, soft-constraint
+  metrics, unplaced classes, pre-flight problems, full report; after a saved run offers "Update Neo4j graph" (`neo4j_etl.run_etl(year)`).
+- **Faculty absent** (Neo4j): `neo4j_queries.faculty_absence_plan`; metrics, per-class status (Coverable / Needs Teaches row / Uncovered),
+  substitutes per class, CSV; warns when the graph is stale vs MySQL (compares sum of Q7 periods with Timetable rows) with an update button.
+- **Clash checker**, 3 tabs: saved timetable (`sp_list_clashes`, `sp_hours_coverage`); "Check a proposed class" via new
+  `generator.check_proposed_class(conn, year, section, course, faculty, room, slot)` (8 rules, hard vs soft, writes nothing); "Move a class (ripple)" via Neo4j Q8.
+- **Statistics**: metrics + charts (faculty workload, room utilisation, classes per day/period, theory vs lab, section-load table) from
+  `sp_faculty_workload` / `sp_room_utilization`; Neo4j "graph insights" expander (most conflicted courses, cross-department links).
+- **Neo4j down** => friendly message on the Neo4j parts; the rest keeps working. MySQL down => error + `st.stop()`.
+- Added helpers: `utils.dept_code`, `utils.build_week_grid`, `utils.grid_to_html`, `utils.to_minutes` now accepts 'HH:MM' strings;
+  `neo4j_etl.dept_code` delegates to utils. Layout args that changed across Streamlit versions (`use_container_width`/`width`) are deliberately avoided.
+- **Tested** with Streamlit's `AppTest` against real MySQL: every page loads without exceptions, numbers match (section 1 = 15 periods, 154 classes, 12.8% avg
+  room use), generator page (dry run / refuses without Replace / saves with Replace / pre-flight error), proposal check (accept + 3-rule reject),
+  Neo4j pages with a stand-in server (absent plan, stale warning, ripple, insights) and with Neo4j down. **Not verified:** visual appearance in a real browser.
+- Step 6 should ship `requirements.txt` with streamlit + pandas, and tests can reuse `AppTest`, `build_week_grid`, `check_proposed_class`.
+
 ## 6. Schema (from the PDF, source of truth)
 Tables and columns (names must not change):
 - `Department(dept_id PK, dept_name UNIQUE, building)`
@@ -237,7 +258,7 @@ Reads from MySQL, inserts into `Timetable`.
   faculty workload ranking; ripple-effect query for moving one class.
 - Expose all of them as Python functions.
 
-### Step 5: Streamlit UI (`app/streamlit_app.py`)
+### Step 5: Streamlit UI: DONE (requirements kept for reference)
 Pages: weekly-grid timetable per section / faculty / room; run the generator; **"faculty absent" tool** (Neo4j: affected
 classes + suggested substitutes); clash checker; basic statistics charts.
 

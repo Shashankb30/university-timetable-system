@@ -1,0 +1,25 @@
+=================== 1. ENVIRONMENT ===================
+ID=org.freedesktop.platform
+PRETTY_NAME="Freedesktop SDK 25.08 (Flatpak runtime)"
+kernel      : 6.19.11-arch1-1
+glibc       : ldd (GNU libc) 2.42
+pacman      : NOT FOUND in this shell
+sandbox vars: FLATPAK_ID='com.visualstudio.code' SNAP='' container='flatpak' CONTAINER_ID=''
+CPU         :  AMD Ryzen AI 7 350 w/ Radeon 860M
+CPU flags   : fma sse4_2 avx avx2 bmi2 avx512f 
+tools/probe_pandas.sh: line 22: /home/shawshank/Documents/DBMS/Uni: No such file or directory
+python      : 
+packages    : numpy 2.5.4;pandas 3.1.0;pyarrow 26.0.0;streamlit 1.66.1;
+
+=================== 2. WHERE DOES THE CURRENT ENVIRONMENT CRASH? ===================
+(exit code 127; 139 = segmentation fault, 0 = fine)
+
+=================== 3. TRY OTHER VERSION COMBINATIONS (throw-away venvs) ===================
+tools/probe_pandas.sh: line 48:  1756 Segmentation fault         (core dumped) "$d/bin/python" -c "import pandas; print(pandas.__version__)" > /tmp/probe_out_$i.log 2>&1
+[1] CRASH (exit 139): numpy==2.4.4 pandas==3.0.2 pyarrow==26.0.0
+tools/probe_pandas.sh: line 48:  1832 Segmentation fault         (core dumped) "$d/bin/python" -c "import pandas; print(pandas.__version__)" > /tmp/probe_out_$i.log 2>&1
+[2] CRASH (exit 139): numpy==2.2.6 pandas==2.3.3 pyarrow==21.0.0
+[3] OK             : numpy==2.4.4 pandas==3.0.2
+
+legend: OK = pandas imports fine with exactly those versions.
+Done. Paste everything above into the chat.

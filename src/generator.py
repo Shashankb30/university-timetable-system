@@ -563,6 +563,63 @@ def save_timetable(conn, academic_year: str, rows: list[tuple]) -> None:
         cur.close()
 
 
+# ------------------------------------------------------ what-if validation
+def check_proposed_class(conn, academic_year: str, section_id: int, course_id: str,
+                         faculty_id: int, room_id: int, slot_id: int) -> list[dict]:
+    """
+    Would this class be accepted? Checks every rule WITHOUT writing anything.
+    Returns one dict per rule: {"rule", "ok", "hard", "detail"}. hard=True rules
+    are enforced by MySQL (unique keys, foreign keys, triggers); the weekly-hours
+    rule is enforced by the generator only.
+    """
+    def one(sql, params):
+        rows = db.query(conn, sql, params)
+        return rows[0] if rows else None
+
+    sec = one("SELECT strength FROM Section WHERE section_id = %s", (section_id,))
+    crs = one("SELECT course_type, weekly_hours FROM Course WHERE course_id = %s", (course_id,))
+    room = one("SELECT building, room_no, capacity, room_type FROM Classroom WHERE room_id = %s", (room_id,))
+    taught = one("SELECT 1 AS x FROM Teaches WHERE faculty_id = %s AND course_id = %s",
+                 (faculty_id, course_id))
+    planned = one("SELECT 1 AS x FROM Section_Course WHERE section_id = %s AND course_id = %s",
+                  (section_id, course_id))
+    busy = db.query(conn, "SELECT t.section_id, t.faculty_id, t.room_id, t.course_id "
+                          "FROM Timetable t WHERE t.academic_year = %s AND t.slot_id = %s "
+                          "AND (t.section_id = %s OR t.faculty_id = %s OR t.room_id = %s)",
+                    (academic_year, slot_id, section_id, faculty_id, room_id))
+    done = one("SELECT COUNT(*) AS n FROM Timetable WHERE academic_year = %s AND section_id = %s "
+               "AND course_id = %s", (academic_year, section_id, course_id))["n"]
+
+    def clash(col, value):
+        hit = [b for b in busy if b[col] == value]
+        return (not hit, "free" if not hit else f"already used by a {hit[0]['course_id']} class in this slot")
+
+    ok_s, d_s = clash("section_id", section_id)
+    ok_f, d_f = clash("faculty_id", faculty_id)
+    ok_r, d_r = clash("room_id", room_id)
+    need = "LAB" if crs and crs["course_type"] == "LAB" else "LECTURE"
+    out = [
+        {"rule": "Section is free in this slot", "ok": ok_s, "hard": True, "detail": d_s},
+        {"rule": "Faculty is free in this slot", "ok": ok_f, "hard": True, "detail": d_f},
+        {"rule": "Room is free in this slot", "ok": ok_r, "hard": True, "detail": d_r},
+        {"rule": "Faculty is qualified (Teaches)", "ok": taught is not None, "hard": True,
+         "detail": "listed in Teaches" if taught else "not listed in Teaches for this course"},
+        {"rule": "Course is in the section's plan (Section_Course)", "ok": planned is not None, "hard": True,
+         "detail": "in the plan" if planned else "section does not take this course"},
+    ]
+    if crs and room:
+        out.append({"rule": "Room type fits the course", "ok": room["room_type"] == need, "hard": True,
+                    "detail": f"{crs['course_type']} course needs a {need} room; "
+                              f"{room['building']}-{room['room_no']} is {room['room_type']}"})
+    if sec and room:
+        out.append({"rule": "Room capacity >= section strength", "ok": room["capacity"] >= sec["strength"],
+                    "hard": True, "detail": f"capacity {room['capacity']} vs strength {sec['strength']}"})
+    if crs:
+        out.append({"rule": "Section still needs hours for this course", "ok": done < crs["weekly_hours"],
+                    "hard": False, "detail": f"{done} of {crs['weekly_hours']} weekly periods already scheduled"})
+    return out
+
+
 # ------------------------------------------------------------- main entry
 def generate_timetable(academic_year: str | None = None, *, replace: bool = False,
                        allow_partial: bool = False, dry_run: bool = False,
