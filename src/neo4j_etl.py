@@ -27,6 +27,8 @@ import sys
 import time
 from pathlib import Path
 
+import mysql.connector
+
 import db
 import neo4j_queries
 import utils
@@ -341,8 +343,16 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     try:
         result = run_etl(args.year, args.reset)
+    except mysql.connector.Error as exc:
+        print(f"\nCould not use MySQL: {exc}\n"
+              "Check that the database server is running and MYSQL_* in .env are correct.",
+              file=sys.stderr)
+        return 2
     except Exception as exc:                      # friendly hint for the usual first-run problems
         name = type(exc).__name__
+        if name == "RuntimeError" and "MYSQL" in str(exc):
+            print(f"\nCould not use MySQL: {exc}", file=sys.stderr)
+            return 2
         if name in ("ServiceUnavailable", "AuthError") or (
                 name == "RuntimeError" and "NEO4J" in str(exc)):
             print(f"\nCould not use Neo4j ({name}): {exc}\n"

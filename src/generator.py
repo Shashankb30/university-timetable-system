@@ -716,9 +716,16 @@ def main(argv=None) -> int:
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args(argv)
 
-    res = generate_timetable(args.year, replace=args.replace, allow_partial=args.allow_partial,
-                             dry_run=args.dry_run, time_limit=args.time_limit,
-                             max_nodes=args.max_nodes, restarts=args.restarts, seed=args.seed)
+    try:
+        res = generate_timetable(args.year, replace=args.replace, allow_partial=args.allow_partial,
+                                 dry_run=args.dry_run, time_limit=args.time_limit,
+                                 max_nodes=args.max_nodes, restarts=args.restarts, seed=args.seed)
+    except (mysql.connector.Error, RuntimeError) as exc:      # connection / configuration problems
+        print(f"Could not use MySQL: {exc}\n"
+              "Check that the database server is running and that MYSQL_HOST / MYSQL_PORT / "
+              "MYSQL_USER / MYSQL_PASSWORD in .env are correct (see README, Troubleshooting).",
+              file=sys.stderr)
+        return 2
     print(res.report())
     return 0 if res.success else 1
 

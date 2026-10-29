@@ -1,0 +1,9 @@
+# Python dependencies (tested with Python 3.12; 3.11-3.13 should work).
+# Install:  pip install -r requirements.txt
+#
+# Tested versions: mysql-connector-python 26.7.0, neo4j 6.4.1, pandas 3.0.2/3.1.0,
+# streamlit 1.66.1. The ranges below are deliberately loose.
+mysql-connector-python>=8.4
+neo4j>=5.20,<7
+pandas>=2.2
+streamlit>=1.40
