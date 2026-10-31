@@ -3,8 +3,10 @@ The MySQL -> Neo4j export, tested WITHOUT a Neo4j server: a recording stand-in
 for the Neo4j session captures every statement the ETL would send.
 """
 import re
+from types import SimpleNamespace
 
 import neo4j_etl as E
+import neo4j_queries as NQ
 import utils
 
 
@@ -28,9 +30,12 @@ class RecordingSession:
         return fn(Tx(self.log))
 
 
+def quiet(*_):
+    pass
+
+
 def run_all(conn, year):
     s = RecordingSession()
-    quiet = lambda *_: None
     E.apply_schema(s, quiet)
     E.load_nodes(s, conn, quiet)
     E.load_static_relationships(s, conn, quiet)
@@ -101,3 +106,37 @@ def test_helpers():
     assert E.dept_code("Electronics and Communication Engineering") == "ECE"
     assert len(E.read_statements(E.CONSTRAINTS_FILE)) >= 15
     assert all(s.startswith("CREATE") for s in E.read_statements(E.CONSTRAINTS_FILE))
+
+
+def test_single_year_run_verifies_every_year_the_graph_holds(monkeypatch, year):
+    """
+    Regression: `neo4j_etl.py --year Y` used to compare the whole graph with MySQL's
+    counts for Y alone, so a second academic year in the graph caused a false MISMATCH.
+    """
+    class Session(RecordingSession):
+        def execute_read(self, fn):            # graph_years() asks which years are in the graph
+            rows = [{"y": "2001-2002"}, {"y": year}]
+            return fn(SimpleNamespace(run=lambda *a, **k: SimpleNamespace(data=lambda: rows)))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    driver = SimpleNamespace(verify_connectivity=lambda: None, session=lambda **kw: Session())
+    monkeypatch.setattr(NQ, "get_driver", lambda: driver)
+    seen = []
+    empty = {"nodes": {}, "relationships": {}}
+    monkeypatch.setattr(E, "expected_counts", lambda conn, years: seen.append(years) or empty)
+    monkeypatch.setattr(E, "actual_counts", lambda session: empty)
+    result = E.run_etl(year, log=quiet)
+    assert result["ok"] and seen == [sorted({"2001-2002", year})]
+
+
+def test_cli_explains_an_unreachable_neo4j(monkeypatch, capsys):
+    NQ.close_driver()                           # drop any driver cached by earlier tests
+    monkeypatch.setenv("NEO4J_URI", "bolt://127.0.0.1:1")
+    monkeypatch.setenv("NEO4J_PASSWORD", "irrelevant")
+    assert E.main(["--year", "2001-2002"]) == 2
+    assert "Could not use Neo4j" in capsys.readouterr().err

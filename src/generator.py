@@ -179,7 +179,7 @@ class Problem:
 
     # rooms that satisfy hard room constraints for (section, course), best fit first
     def eligible_rooms(self, section_id: int, course_id: str) -> list[int]:
-        need = "LAB" if self.courses[course_id]["course_type"] == "LAB" else "LECTURE"
+        need = self.room_need(course_id)
         strength = self.sections[section_id]["strength"]
         ok = [r for r in self.rooms if r["room_type"] == need and r["capacity"] >= strength]
         ok.sort(key=lambda r: (r["capacity"], r["room_id"]))
@@ -651,12 +651,13 @@ def generate_timetable(academic_year: str | None = None, *, replace: bool = Fals
 
         solution = None
         deadline = t0 + time_limit
-        for attempt in range(max(1, restarts)):
+        attempts = max(1, restarts)                   # restarts=0 still means one attempt
+        for attempt in range(attempts):
             now = time.monotonic()
-            share = (deadline - now) / (restarts - attempt)
+            share = (deadline - now) / (attempts - attempt)
             sched = Scheduler(P, random.Random(seed + attempt))
             ordered = sched.order_tasks(tasks, jitter=0.0 if attempt == 0 else 0.4)
-            solution, nodes = sched.solve(ordered, max_nodes // max(1, restarts), now + share)
+            solution, nodes = sched.solve(ordered, max_nodes // attempts, now + share)
             res.nodes += nodes
             res.attempts = attempt + 1
             if solution is not None:

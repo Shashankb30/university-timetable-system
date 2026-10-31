@@ -40,8 +40,8 @@ CONSTRAINTS_FILE = utils.PROJECT_ROOT / "cypher" / "constraints.cypher"
 # ------------------------------------------------------------------ helpers
 def read_statements(path: str | Path) -> list[str]:
     """Split a .cypher file into statements: drop '//' comment lines, split on ';'."""
-    lines = [l for l in Path(path).read_text(encoding="utf-8").splitlines()
-             if not l.strip().startswith("//")]
+    lines = [line for line in Path(path).read_text(encoding="utf-8").splitlines()
+             if not line.strip().startswith("//")]
     return [s.strip() for s in "\n".join(lines).split(";") if s.strip()]
 
 
@@ -288,6 +288,13 @@ def expected_counts(conn, years: list[str]) -> dict:
     return {"nodes": nodes, "relationships": rels}
 
 
+def graph_years(session) -> list[str]:
+    """Academic years that currently have SCHEDULED_IN relationships in the graph."""
+    rows = session.execute_read(lambda tx: tx.run(
+        "MATCH ()-[s:SCHEDULED_IN]->() RETURN DISTINCT s.academic_year AS y ORDER BY y").data())
+    return [r["y"] for r in rows]
+
+
 def actual_counts(session) -> dict:
     return {"nodes": neo4j_queries.node_counts(session),
             "relationships": neo4j_queries.relationship_counts(session)}
@@ -326,7 +333,9 @@ def run_etl(academic_year: str | None = None, reset: bool = False, log=print) ->
             load_static_relationships(session, conn, log)
             load_timetable(session, conn, years, all_years=academic_year is None, log=log)
             derive_conflicts(session, log)
-            expected = expected_counts(conn, years)
+            # Verify against every year the graph holds, not only the one just reloaded:
+            # with --year, other years' classes stay in the graph and must still match MySQL.
+            expected = expected_counts(conn, sorted(set(years) | set(graph_years(session))))
             actual = actual_counts(session)
     problems = compare_counts(expected, actual)
     log(f"\nVerification: {'OK, graph matches MySQL' if not problems else 'MISMATCH'} "
