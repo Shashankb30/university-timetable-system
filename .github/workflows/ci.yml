@@ -27,6 +27,8 @@ jobs:
           python-version: "3.12"
       - name: Ruff
         run: pipx run ruff check --output-format=github .
+      - name: Workflow files are valid (actionlint)
+        run: pipx run --spec actionlint-py actionlint
       - name: docker-compose.yml is valid
         run: docker compose config --quiet
       - name: Shell scripts parse
@@ -104,7 +106,7 @@ jobs:
       - run: pip install -r requirements-dev.txt
       - name: Generate the timetable
         run: python src/generator.py --replace
-      - name: Tests (Neo4j tests skip: no Neo4j in this job)
+      - name: "Tests (Neo4j tests skip: no Neo4j in this job)"
         run: python -m pytest
         env:
           RUN_UI_TESTS: "1"
