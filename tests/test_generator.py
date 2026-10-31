@@ -9,7 +9,6 @@ import pytest
 
 import db
 import generator
-import utils
 from conftest import TEST_YEAR
 
 
@@ -26,7 +25,7 @@ def hard_violations(conn, rows):
         for (k, slot), n in Counter((r[idx], r[3]) for r in rows).items():
             if n > 1:
                 bad.append(f"{key_name} {k} double-booked in slot {slot}")
-    for course, fac, room, slot, sec, _ in rows:
+    for course, fac, room, _slot, sec, _ in rows:
         c, r, s = courses[course], rooms[room], sections[sec]
         need = "LAB" if c["course_type"] == "LAB" else "LECTURE"
         if r["room_type"] != need:
@@ -71,7 +70,7 @@ def test_labs_are_consecutive_and_never_straddle_lunch(conn):
     slots = {s["slot_id"]: s for s in db.query(conn, "SELECT * FROM TimeSlot")}
     labs = {r["course_id"] for r in db.query(conn, "SELECT course_id FROM Course WHERE course_type='LAB'")}
     groups = defaultdict(list)
-    for course, fac, room, slot, sec, _ in res.rows:
+    for course, _fac, _room, slot, sec, _ in res.rows:
         if course in labs:
             groups[(course, sec, slots[slot]["day_of_week"])].append(slots[slot]["period_no"])
     assert groups
@@ -147,6 +146,44 @@ def test_impossible_input_reports_instead_of_crashing(conn):
     res = generator.generate_timetable(TEST_YEAR, conn=conn, replace=True)
     assert not res.complete and not res.committed and res.preflight
     assert any("LECTURE room" in p for p in res.preflight)
+
+
+def test_search_failure_falls_back_to_a_clash_free_partial_with_reasons(conn):
+    """
+    Feasible on paper (pre-flight passes) but not in practice: only room 1 still seats a
+    full section. The search must give up within its budget, keep a clash-free partial
+    timetable, explain every class it could not place, and save nothing.
+    """
+    cur = conn.cursor()
+    cur.execute("UPDATE Classroom SET capacity = 40 WHERE room_type = 'LECTURE' AND room_id <> 1")
+    res = generator.generate_timetable(TEST_YEAR, conn=conn, replace=True, time_limit=5, max_nodes=5000)
+    assert not res.preflight and not res.complete and not res.committed, res.report()
+    assert 0 < res.placed < res.required and "not saved" in res.note
+    assert res.unplaced and all("no free LECTURE room" in u["reason"] for u in res.unplaced)
+    assert sum(u["periods"] for u in res.unplaced) == res.required - res.placed
+    clashes = [v for v in hard_violations(conn, res.rows) if "double-booked" in v or " room " in v]
+    assert clashes == []                                             # partial, but never invalid
+    assert "PARTIAL" in res.report() and "Could NOT be placed" in res.report()
+
+
+def test_zero_restarts_still_searches_once(conn):
+    res = generator.generate_timetable(TEST_YEAR, dry_run=True, conn=conn, restarts=0)
+    assert res.complete and res.attempts == 1
+
+
+# ------------------------------------------------------------------------- CLI
+def test_cli_dry_run_exit_code_and_report(capsys):
+    assert generator.main(["--year", TEST_YEAR, "--dry-run", "--seed", "3"]) == 0
+    out = capsys.readouterr().out
+    assert "Result        : COMPLETE" in out and "Saved to MySQL: no -- dry run" in out
+
+
+def test_cli_explains_an_unreachable_database(monkeypatch, capsys):
+    monkeypatch.delenv("MYSQL_UNIX_SOCKET", raising=False)
+    monkeypatch.setenv("MYSQL_HOST", "127.0.0.1")
+    monkeypatch.setenv("MYSQL_PORT", "1")                           # nothing listens on port 1
+    assert generator.main(["--dry-run"]) == 2
+    assert "Could not use MySQL" in capsys.readouterr().err
 
 
 # ------------------------------------------------------------ "is this class allowed?"

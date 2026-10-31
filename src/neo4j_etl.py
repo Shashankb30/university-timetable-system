@@ -7,6 +7,7 @@ running the ETL twice produces the same graph. Order of work:
   1. constraints + indexes   (cypher/constraints.cypher, created FIRST)
   2. nodes                   Department, Faculty, Course, Section, Student, Classroom, TimeSlot
   3. static relationships    WORKS_IN, OFFERED_BY, BELONGS_TO, STUDIES_IN, TEACHES, ENROLLED_IN, TAKES
+                             (relationships whose MySQL row was deleted are pruned)
   4. timetable               SCHEDULED_IN (one per Timetable row) + derived TEACHES_SECTION.
                              The affected year's old SCHEDULED_IN / TEACHES_SECTION are deleted
                              first, so a regenerated timetable leaves no ghost classes.
@@ -40,8 +41,8 @@ CONSTRAINTS_FILE = utils.PROJECT_ROOT / "cypher" / "constraints.cypher"
 # ------------------------------------------------------------------ helpers
 def read_statements(path: str | Path) -> list[str]:
     """Split a .cypher file into statements: drop '//' comment lines, split on ';'."""
-    lines = [l for l in Path(path).read_text(encoding="utf-8").splitlines()
-             if not l.strip().startswith("//")]
+    lines = [line for line in Path(path).read_text(encoding="utf-8").splitlines()
+             if not line.strip().startswith("//")]
     return [s.strip() for s in "\n".join(lines).split(";") if s.strip()]
 
 
@@ -130,6 +131,23 @@ MATCH (s:Section {section_id: row.section_id}), (c:Course {course_id: row.course
 MERGE (s)-[t:TAKES]->(c)
 SET t.semester = row.semester""",
 }
+
+# Endpoints of each static relationship: (from label, from key, to label, to key). Used to PRUNE
+# relationships whose MySQL row was deleted (e.g. a Teaches row), so MERGE-only loading cannot
+# leave ghosts behind. The keys are also the first two columns of the matching SELECT.
+REL_ENDPOINTS = {
+    "WORKS_IN": ("Faculty", "faculty_id", "Department", "dept_id"),
+    "OFFERED_BY": ("Course", "course_id", "Department", "dept_id"),
+    "BELONGS_TO": ("Section", "section_id", "Department", "dept_id"),
+    "STUDIES_IN": ("Student", "student_id", "Section", "section_id"),
+    "TEACHES": ("Faculty", "faculty_id", "Course", "course_id"),
+    "ENROLLED_IN": ("Student", "student_id", "Course", "course_id"),
+    "TAKES": ("Section", "section_id", "Course", "course_id"),
+}
+Q_PRUNE = {rel: f"""
+MATCH (a:{a})-[r:{rel}]->(b:{b})
+WHERE NOT [a.{ka}, b.{kb}] IN $keys
+DELETE r""" for rel, (a, ka, b, kb) in REL_ENDPOINTS.items()}
 
 # one SCHEDULED_IN per Timetable row; MERGE key = timetable_id (unique constraint)
 Q_SCHEDULED = """
@@ -235,7 +253,10 @@ def load_static_relationships(session, conn, log=print) -> None:
         "TAKES": "SELECT section_id, course_id, semester FROM Section_Course",
     }
     for rel, sql in src.items():
-        _batched(session, Q_RELS[rel], db.query(conn, sql), rel, log)
+        rows = db.query(conn, sql)
+        _batched(session, Q_RELS[rel], rows, rel, log)
+        _, from_key, _, to_key = REL_ENDPOINTS[rel]
+        _write(session, Q_PRUNE[rel], keys=[[r[from_key], r[to_key]] for r in rows])
 
 
 def load_timetable(session, conn, years: list[str], all_years: bool, log=print) -> None:
@@ -288,6 +309,13 @@ def expected_counts(conn, years: list[str]) -> dict:
     return {"nodes": nodes, "relationships": rels}
 
 
+def graph_years(session) -> list[str]:
+    """Academic years that currently have SCHEDULED_IN relationships in the graph."""
+    rows = session.execute_read(lambda tx: tx.run(
+        "MATCH ()-[s:SCHEDULED_IN]->() RETURN DISTINCT s.academic_year AS y ORDER BY y").data())
+    return [r["y"] for r in rows]
+
+
 def actual_counts(session) -> dict:
     return {"nodes": neo4j_queries.node_counts(session),
             "relationships": neo4j_queries.relationship_counts(session)}
@@ -326,7 +354,9 @@ def run_etl(academic_year: str | None = None, reset: bool = False, log=print) ->
             load_static_relationships(session, conn, log)
             load_timetable(session, conn, years, all_years=academic_year is None, log=log)
             derive_conflicts(session, log)
-            expected = expected_counts(conn, years)
+            # Verify against every year the graph holds, not only the one just reloaded:
+            # with --year, other years' classes stay in the graph and must still match MySQL.
+            expected = expected_counts(conn, sorted(set(years) | set(graph_years(session))))
             actual = actual_counts(session)
     problems = compare_counts(expected, actual)
     log(f"\nVerification: {'OK, graph matches MySQL' if not problems else 'MISMATCH'} "
