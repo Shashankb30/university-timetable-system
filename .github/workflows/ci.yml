@@ -1,0 +1,110 @@
+# Continuous integration: lint, then the full test suite against
+#   (1) the docker-compose stack (MySQL 8.0 + Neo4j 5.26), exactly as the README's Docker path, and
+#   (2) MariaDB 11.4 (the other supported database), without Neo4j (those tests skip themselves).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Ruff
+        run: pipx run ruff check --output-format=github .
+      - name: docker-compose.yml is valid
+        run: docker compose config --quiet
+      - name: Shell scripts parse
+        run: bash -n docker/mysql/00_app_user.sh tools/probe_pandas.sh
+
+  test-docker-compose:
+    name: tests (MySQL 8.0 + Neo4j 5, docker compose, Python 3.12)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Create .env for the Docker stack
+        run: |
+          cp .env.example .env
+          sed -i 's/^MYSQL_PORT=.*/MYSQL_PORT=3307/' .env
+      - name: Start MySQL and Neo4j
+        run: docker compose up -d --wait
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Generate the timetable
+        run: python src/generator.py --replace
+      - name: Export to Neo4j
+        run: python src/neo4j_etl.py
+      - name: Run every documented Cypher query
+        run: python src/neo4j_queries.py demo
+      - name: Tests (including the opt-in UI tests)
+        run: python -m pytest
+        env:
+          RUN_UI_TESTS: "1"
+      - name: Container logs
+        if: failure()
+        run: docker compose logs --no-color
+
+  test-mariadb:
+    name: tests (MariaDB 11.4, Python 3.11)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      MYSQL_HOST: 127.0.0.1
+      MYSQL_PORT: "3306"
+      MYSQL_USER: timetable
+      MYSQL_PASSWORD: ci_password
+      MYSQL_DATABASE: university_timetable
+    steps:
+      - uses: actions/checkout@v5
+      - name: Load the SQL files with the server's own client (they use DELIMITER)
+        run: |
+          db="${{ job.services.mariadb.id }}"
+          for f in sql/01_schema.sql sql/02_migration_improvements.sql sql/03_seed_data.sql sql/04_views_procedures.sql; do
+            echo "loading $f"
+            docker exec -i "$db" mariadb -uroot -proot < "$f"
+          done
+          docker exec -i "$db" mariadb -uroot -proot -e \
+            "CREATE USER '$MYSQL_USER'@'%' IDENTIFIED BY '$MYSQL_PASSWORD';
+             GRANT ALL PRIVILEGES ON university_timetable.* TO '$MYSQL_USER'@'%';"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Generate the timetable
+        run: python src/generator.py --replace
+      - name: Tests (Neo4j tests skip: no Neo4j in this job)
+        run: python -m pytest
+        env:
+          RUN_UI_TESTS: "1"

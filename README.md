@@ -59,8 +59,10 @@ university-timetable-system/
 ├── CONTEXT.md                    project handoff notes (decisions, status, environment quirks)
 ├── docker-compose.yml            MySQL 8 + Neo4j 5 containers (optional)
 ├── requirements.txt              Python dependencies
-├── requirements-dev.txt          + pytest, for the test suite
+├── requirements-dev.txt          + pytest and ruff, for tests and linting
 ├── pytest.ini                    test configuration and markers
+├── ruff.toml                     lint settings (`ruff check .`)
+├── .github/workflows/ci.yml      GitHub Actions: lint + tests on MySQL 8/Neo4j 5 and on MariaDB
 ├── .env.example                  settings template -> copy to .env
 ├── .gitignore
 ├── sql/
@@ -104,7 +106,7 @@ git clone https://github.com/Shashankb30/university-timetable-system.git univers
 python3 -m venv .venv && source .venv/bin/activate      # Windows: see "Create the Python environment"
 pip install -r requirements.txt
 cp .env.example .env                                    # then edit: set MYSQL_PORT=3307 and your passwords
-docker compose up -d                                    # MySQL + Neo4j (schema + seed load automatically)
+docker compose up -d --wait                             # MySQL + Neo4j (schema + seed load automatically)
 python src/generator.py                                 # build the timetable
 python src/neo4j_etl.py                                 # copy it into the graph
 streamlit run app/streamlit_app.py                      # open http://localhost:8501
@@ -198,8 +200,8 @@ Open `.env` and set your own passwords. The most important lines are explained i
 #### Option A: Docker
 
 ```bash
-docker compose up -d
-docker compose ps                  # wait until "timetable-mysql" shows (healthy); first start takes ~30-60 s
+docker compose up -d --wait        # returns once both containers are healthy; first start takes ~30-60 s
+docker compose ps                  # both should show (healthy)
 ```
 
 - MySQL is published on host port **3307** (so it cannot clash with a MySQL/MariaDB already on your
@@ -210,7 +212,8 @@ docker compose ps                  # wait until "timetable-mysql" shows (healthy
   `NEO4J_PASSWORD` in `.env` (8+ characters).
 - Stop: `docker compose down` · Wipe all data and start fresh: `docker compose down -v`.
 
-*(Docker setup validated for syntax only; not yet run by the author. Please report problems.)*
+*(Verified with Docker 29 / Compose 5. CI starts this exact stack on every pull request and runs the
+whole test suite against it.)*
 
 #### Option B: native installs (no Docker)
 
@@ -553,7 +556,7 @@ substitute your own admin command, or use the `timetable` user.)
 | 10 | Graph size | `python src/neo4j_queries.py demo` (first tables) | nodes 3/20/30/10/120/25/48; `SCHEDULED_IN` 154, `CONFLICTS_WITH` 91, `TEACHES_SECTION` 80, `TEACHES` 62, `ENROLLED_IN` 600 |
 | 11 | Web app | `streamlit run app/streamlit_app.py` | Timetable grid for "CSE / Sem 3 / A" shows 15 periods; sidebar shows MySQL and Neo4j connected |
 | 12 | Constraints bite | In the app: *Clash checker → Check a proposed class*, choose a THEORY course with a LAB room | "MySQL would REJECT this class" |
-| 13 | Whole test suite | `pytest` | `70 passed, 16 skipped` (no Neo4j) · `77 passed, 9 skipped` with Neo4j loaded · `85 passed, 1 skipped` with `RUN_UI_TESTS=1` |
+| 13 | Whole test suite | `pytest` | `81 passed, 16 skipped` (no Neo4j) · `88 passed, 9 skipped` with Neo4j loaded · `96 passed, 1 skipped` with `RUN_UI_TESTS=1` |
 
 ---
 
@@ -607,10 +610,11 @@ substitute your own admin command, or use the `timetable` user.)
 ## Tests
 
 ```bash
-pip install -r requirements-dev.txt          # adds pytest
+pip install -r requirements-dev.txt          # adds pytest and ruff
 pytest                                       # everything that can run (needs MySQL + .env)
 pytest -m neo4j                              # only the live-Neo4j checks (Neo4j running, ETL done)
 RUN_UI_TESTS=1 pytest -m ui                  # Streamlit smoke tests, opt-in (see below)
+ruff check .                                 # lint (same check as CI)
 ```
 
 PowerShell: `$env:RUN_UI_TESTS=1; pytest -m ui` · fish: `env RUN_UI_TESTS=1 pytest -m ui`.
@@ -621,20 +625,21 @@ PowerShell: `$env:RUN_UI_TESTS=1; pytest -m ui` · fish: `env RUN_UI_TESTS=1 pyt
 | File | What it proves |
 |---|---|
 | `test_schema.py` | Object counts and seed sizes; `CHECK` constraints; a room, teacher or section **cannot be double-booked** (errors named by constraint); the **triggers** reject a too-small room and a wrong room type (5001/5002) and a wrong semester (5003); a teacher must be in `Teaches` and a course in the section's plan (composite FKs); a `Teaches` row in use cannot be deleted; `sp_list_clashes` catches drift the triggers cannot see |
-| `test_generator.py` | A complete timetable is found; an **independent checker** (written from the raw tables, not from generator internals) confirms every hard rule and the exact weekly hours; soft constraints met on the seed data; labs consecutive and never across lunch; same seed ⇒ same result; saved timetable passes `sp_list_clashes` and `sp_hours_coverage` with zero rows; refuses to overwrite; a bad row **rolls back the whole save**; impossible input is explained, not crashed on |
-| `test_etl_offline.py` | Without Neo4j: constraints are created first, nodes before relationships, the old timetable is deleted before reload, rows sent equal the MySQL counts, batches never exceed 500 |
+| `test_generator.py` | A complete timetable is found; an **independent checker** (written from the raw tables, not from generator internals) confirms every hard rule and the exact weekly hours; soft constraints met on the seed data; labs consecutive and never across lunch; same seed ⇒ same result; saved timetable passes `sp_list_clashes` and `sp_hours_coverage` with zero rows; refuses to overwrite; a bad row **rolls back the whole save**; impossible input is explained, not crashed on; when the search runs out of budget the partial result is still clash-free, every unplaced class has a reason, and nothing is saved; CLI exit codes (0 / 2 when MySQL is unreachable) |
+| `test_etl_offline.py` | Without Neo4j: constraints are created first, nodes before relationships, the old timetable is deleted before reload, rows sent equal the MySQL counts, batches never exceed 500; `--year` verification covers every year in the graph; a friendly exit code 2 when Neo4j is unreachable |
 | `test_neo4j_live.py` | With Neo4j: every node/relationship count equals MySQL; `CONFLICTS_WITH` built in Neo4j **equals** the SQL definition; workload totals, absence plans, free rooms, shortest paths and the move-ripple agree with MySQL |
 | `test_utils.py` | Times, lunch-aware slot links, the weekly grid and its HTML escaping, error wording, `.env` parsing, masked password report, all 12 queries load and each wrapper passes exactly the parameters its query uses, and importing the Neo4j driver never loads pandas or pyarrow |
 | `test_project_files.py` | Required files exist; every setting the code reads is in `.env.example`; `.env` is git-ignored; `sql/03_seed_data.sql` is byte-identical to what `tools/make_seed.py` generates; the README's options, links and file names are real |
+| `test_db.py` | `db.transaction` commits/rolls back, `db.call_procedure` works with both forms of mysql-connector's `stored_results`, a missing `MYSQL_USER` is reported (no database needed) |
 | `test_ui.py` | Every page of the web app loads and the grid shows the timetable (opt-in; imports pandas) |
 
 **Expected result on the bundled data:**
 
 | Situation | Summary line |
 |---|---|
-| MySQL only (no Neo4j, UI not enabled) | `70 passed, 16 skipped` |
-| + Neo4j running with the graph loaded | `77 passed, 9 skipped` |
-| + `RUN_UI_TESTS=1` | `85 passed, 1 skipped` |
+| MySQL only (no Neo4j, UI not enabled) | `81 passed, 16 skipped` |
+| + Neo4j running with the graph loaded | `88 passed, 9 skipped` |
+| + `RUN_UI_TESTS=1` | `96 passed, 1 skipped` |
 
 The one remaining skip is `test_cypher_files_have_valid_syntax`, which needs the optional `cypher-lint` tool
 (Debian/Ubuntu: `sudo apt install cypher-lint`); with it installed that test runs too.
@@ -649,6 +654,16 @@ Troubleshooting). Run them from a normal terminal. A crash cannot be caught by p
 trigger, the unique key on teachers, or changing the seed data each made the matching tests fail.
 The live-Neo4j tests pass against a real Neo4j 5.26.0 (verified on Arch Linux with MariaDB).
 
+### Continuous integration
+
+`.github/workflows/ci.yml` runs on every pull request and every push to `main`:
+
+| Job | What it does |
+|---|---|
+| `lint` | `ruff check .`, `docker compose config`, and `bash -n` on the shell scripts |
+| `test-docker-compose` | Starts MySQL 8.0 + Neo4j 5.26 with `docker compose up -d --wait` (the Docker path above), runs the generator, the ETL and `neo4j_queries.py demo`, then the **whole** suite including the UI tests (Python 3.12) |
+| `test-mariadb` | Loads the SQL files into MariaDB 11.4 with its own client, runs the generator and the suite (Python 3.11, no Neo4j, so those 7 tests skip) |
+
 ## Status and limitations
 
 | Part | Status |
@@ -657,8 +672,9 @@ The live-Neo4j tests pass against a real Neo4j 5.26.0 (verified on Arch Linux wi
 | Scheduler | Done; verified on MySQL 8.0 and MariaDB |
 | Neo4j ETL and queries | Done; verified on Neo4j 5.26.0 |
 | Web app | Done; headless-tested and seen working in a browser; run it from a normal terminal |
-| Docker Compose | Written; syntax-checked, not run yet |
-| Automated test suite | Done: 77 tests pass with MariaDB + Neo4j 5.26.0 on the author's machine (70 need only MySQL); UI tests are opt-in |
+| Docker Compose | Done; verified (MySQL 8.0 + Neo4j 5.26) and exercised by CI |
+| Automated test suite | Done: 96 tests pass with MySQL 8.0 + Neo4j 5.26 (88 without the opt-in UI tests, 81 need only MySQL); also green on MariaDB |
+| Continuous integration | GitHub Actions: lint + tests on MySQL 8/Neo4j 5 (docker compose) and on MariaDB 11.4 |
 
 Known limitations (by design, for a mini-project):
 
@@ -677,7 +693,8 @@ Known limitations (by design, for a mini-project):
 ## Working in a team
 
 - Copy `.env.example` to `.env` and use your own passwords. **Never commit `.env`** (it is git-ignored).
-- Run `pytest` before you commit; add a test with every rule you add.
+- Run `pytest` and `ruff check .` before you commit; add a test with every rule you add. CI runs both on
+  every pull request.
 - Change the database through **new migration files** (`sql/05_...sql`), not by editing the applied ones.
 - Teammates can use different servers (MySQL vs MariaDB): everything uses standard SQL and the portable
   `source` loading command.
