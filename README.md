@@ -100,7 +100,7 @@ university-timetable-system/
 Fastest path **with Docker** (any OS with Docker Desktop / Docker Engine):
 
 ```bash
-git clone <your-repo-url> university-timetable-system && cd university-timetable-system
+git clone https://github.com/Shashankb30/university-timetable-system.git university-timetable-system && cd university-timetable-system
 python3 -m venv .venv && source .venv/bin/activate      # Windows: see "Create the Python environment"
 pip install -r requirements.txt
 cp .env.example .env                                    # then edit: set MYSQL_PORT=3307 and your passwords
@@ -134,7 +134,7 @@ get the smoothest experience in **WSL 2 (Ubuntu)**: follow the Linux steps there
 ### 2. Get the code
 
 ```bash
-git clone <your-repo-url> university-timetable-system
+git clone https://github.com/Shashankb30/university-timetable-system.git university-timetable-system
 cd university-timetable-system
 ```
 
