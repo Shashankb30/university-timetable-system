@@ -62,6 +62,8 @@ class FakeErr(Exception):
     (1062, "Duplicate entry for key 'uq_faculty_slot'", "faculty"),
     (1062, "Duplicate entry for key 'uq_section_slot'", "section"),
     (1452, "foreign key constraint fails (CONSTRAINT `fk_tt_teaches` FOREIGN KEY ...)", "Teaches"),
+    (1451, "Cannot delete or update a parent row: a foreign key constraint fails (CONSTRAINT `fk_tt_teaches` ...)",
+     "still used"),
     (5001, "Room capacity is less than section strength", "capacity"),
     (5002, "Course type does not match room type", "room type"),
     (9999, "something else", "9999"),

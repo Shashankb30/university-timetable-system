@@ -50,3 +50,14 @@ def test_generator_page_dry_run():
     next(b for b in at.button if "Generate" in b.label).click().run()
     no_exceptions(at)
     assert any("COMPLETE" in s.value for s in at.success)
+
+
+def test_absent_page_offers_substitute_assignment():
+    """With Neo4j loaded, each affected class with candidates gets a substitute picker and an Assign button
+    (the button is not clicked: that would change the real timetable)."""
+    at = start("Faculty absent")
+    no_exceptions(at)
+    if any("Neo4j" in e.value for e in at.error):
+        pytest.skip("Neo4j not reachable")
+    assigns = [b for b in at.button if b.label.startswith("Assign ")]
+    assert assigns and any(s.label == "Substitute" for s in at.selectbox)

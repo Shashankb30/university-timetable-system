@@ -93,6 +93,10 @@ def describe_mysql_error(exc: BaseException) -> str:
         m = re.search(r"CONSTRAINT `([^`]+)`", msg)
         name = m.group(1) if m else "?"
         return f"foreign key {name}: {_FK_MEANING.get(name, 'referenced row missing')}"
+    if errno == 1451:                       # FK RESTRICT on delete/update of a parent row
+        m = re.search(r"CONSTRAINT `([^`]+)`", msg)
+        name = m.group(1) if m else "?"
+        return f"foreign key {name}: the row is still used by the timetable"
     if errno in _TRIGGER_MEANING:
         return f"rule {errno}: {_TRIGGER_MEANING[errno]}"
     return f"MySQL error {errno}: {msg}"

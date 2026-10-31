@@ -72,6 +72,19 @@ def test_rows_sent_match_mysql_counts(conn, year):
     assert rows_sent(log, E.Q_SCHEDULED) == exp["relationships"]["SCHEDULED_IN"]
 
 
+def test_deleted_mysql_rows_are_pruned_from_every_static_relationship(conn, year):
+    """MERGE alone never deletes: each static type is followed by a prune keyed on MySQL's current rows."""
+    log = run_all(conn, year)
+    texts = [q for q, _ in log]
+    exp = E.expected_counts(conn, [year])["relationships"]
+    for rel, query in E.Q_RELS.items():
+        last_batch = max(i for i, q in enumerate(texts) if q == query.strip())
+        prune = texts.index(E.Q_PRUNE[rel].strip())
+        assert prune == last_batch + 1, rel                    # right after its own (batched) load
+        keys = log[prune][1]["keys"]
+        assert len(keys) == exp[rel] and all(len(k) == 2 for k in keys), rel
+
+
 def test_batches_never_exceed_the_batch_size(conn, year):
     assert max(len(p["rows"]) for _, p in run_all(conn, year) if "rows" in p) <= E.BATCH_SIZE
     s = RecordingSession()

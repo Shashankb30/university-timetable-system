@@ -213,7 +213,7 @@ tested with Streamlit 1.66.1 / pandas 3.0.2). Reads MySQL via `db.py`; Neo4j is 
 - **User's folder as of the last screenshot:** present = app, cypher, docker/mysql/00_app_user.sh, sql (4), src (5), tests (empty), tools/probe_pandas.sh, .env, .gitignore, CONTEXT.md, docker-compose.yml, README.md, requirements.txt, probe_output.txt (can delete).
   **Missing:** `.env.example`, `tools/make_seed.py` (and now `pytest.ini`, `requirements-dev.txt`, `tests/*`). `tests/test_project_files.py` fails until these exist.
 - **Project state: COMPLETE and verified end to end on the user's machine, apart from the items above.**
-- **Possible next work:** apply a chosen substitute from the UI (UPDATE Timetable.faculty_id + ETL); student electives/backlogs; split lab batches; LICENSE (the owners must pick one).
+- **Possible next work:** dated one-day covers (needs a new substitutions table/migration); student electives/backlogs; split lab batches; LICENSE (the owners must pick one).
 
 ## 5g. CI, Docker verification and cleanup pass
 - **Docker compose verified** (Docker 29 / Compose 5, MySQL 8.0.46, Neo4j 5.26): init scripts load all four SQL files and create the app user;
@@ -228,6 +228,20 @@ tested with Streamlit 1.66.1 / pandas 3.0.2). Reads MySQL via `db.py`; Neo4j is 
   the `--year` regression. Counts: MySQL only 81 passed/16 skipped; + Neo4j 88/9; + `RUN_UI_TESTS=1` 96/1 (the skip is the optional cypher-lint test). Also green on MariaDB 11.4 + Python 3.11.
 - **Cleanup:** ruff-clean (unused imports, ambiguous names, one-statement-per-line); `Problem.eligible_rooms` reuses `room_need`; the app's three copies of the
   section-dropdown query are one `section_options()` helper.
+
+## 5h. Substitute assignment (done)
+- **`generator.assign_substitute(conn, timetable_id, faculty_id, add_teaches=False)`** -> change record; one transaction:
+  optional `INSERT Teaches` (for a RELATED candidate) + `UPDATE Timetable SET faculty_id ... WHERE timetable_id AND faculty_id = old`
+  (guards concurrent edits). Python pre-checks give plain messages (unknown class/faculty, same faculty, busy in that slot, not in Teaches);
+  MySQL still enforces them (uq_faculty_slot, fk_tt_teaches, trigger). Errors -> `SubstitutionError`. It is a WEEKLY reassignment, not a one-day cover.
+  **`revert_substitution(conn, change)`** gives the class back and drops the Teaches row it added, atomically (FK 1451 if that row is now used -> nothing changes).
+- **ETL:** static relationships are now pruned against MySQL after loading (`REL_ENDPOINTS` / `Q_PRUNE`), so a deleted Teaches/Enrollment/... row
+  no longer leaves a ghost relationship. `utils.describe_mysql_error` explains 1451.
+- **UI (Faculty absent page):** each class expander has a Substitute picker + Assign button (RELATED requires ticking "Also add ... to Teaches");
+  after a change the app runs `neo4j_etl.run_etl(year)` and shows the outcome with **Undo** / Dismiss. The stale-graph warning now compares classes per
+  faculty (Neo4j Q7 vs MySQL), so a reassignment with an unchanged total is detected. Clicked through in a real browser (Playwright): assign, RELATED + Teaches, undo.
+- **Tests:** `tests/test_substitutes.py` (6 tests, TEST_YEAR only, Teaches restored), ETL prune test, 1451 wording, opt-in UI test that the controls render.
+  Counts: MySQL only 90/17 skipped; + Neo4j 97/10; + `RUN_UI_TESTS=1` 106/1. MariaDB + Python 3.11 (no Neo4j, UI on): 98/9.
 
 ## 6. Schema (from the PDF, source of truth)
 Tables and columns (names must not change):
