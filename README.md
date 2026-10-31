@@ -59,6 +59,8 @@ university-timetable-system/
 ├── CONTEXT.md                    project handoff notes (decisions, status, environment quirks)
 ├── docker-compose.yml            MySQL 8 + Neo4j 5 containers (optional)
 ├── requirements.txt              Python dependencies
+├── requirements-dev.txt          + pytest, for the test suite
+├── pytest.ini                    test configuration and markers
 ├── .env.example                  settings template -> copy to .env
 ├── .gitignore
 ├── sql/
@@ -80,7 +82,15 @@ university-timetable-system/
 ├── tools/
 │   ├── make_seed.py              regenerates sql/03_seed_data.sql (optional)
 │   └── probe_pandas.sh           diagnostic for the pandas/pyarrow crash (see Troubleshooting)
-└── tests/                        automated tests (planned, see "Tests")
+└── tests/                        automated test suite (see "Tests")
+    ├── conftest.py               fixtures; safety rules (tests never touch real data)
+    ├── test_schema.py            constraints, composite FKs, triggers, procedures
+    ├── test_generator.py         scheduler, independent re-validation, saving, failure reports
+    ├── test_etl_offline.py       ETL logic against a recording stand-in (no Neo4j needed)
+    ├── test_neo4j_live.py        graph vs MySQL on a running Neo4j (auto-skips)
+    ├── test_utils.py             helpers, error wording, the Cypher query file
+    ├── test_project_files.py     files, docs and settings agree with each other
+    └── test_ui.py                Streamlit smoke tests (opt-in)
 ```
 
 ---
@@ -543,6 +553,7 @@ substitute your own admin command, or use the `timetable` user.)
 | 10 | Graph size | `python src/neo4j_queries.py demo` (first tables) | nodes 3/20/30/10/120/25/48; `SCHEDULED_IN` 154, `CONFLICTS_WITH` 91, `TEACHES_SECTION` 80, `TEACHES` 62, `ENROLLED_IN` 600 |
 | 11 | Web app | `streamlit run app/streamlit_app.py` | Timetable grid for "CSE / Sem 3 / A" shows 15 periods; sidebar shows MySQL and Neo4j connected |
 | 12 | Constraints bite | In the app: *Clash checker → Check a proposed class*, choose a THEORY course with a LAB room | "MySQL would REJECT this class" |
+| 13 | Whole test suite | `pytest` | `70 passed, 16 skipped` (no Neo4j) · `77 passed, 9 skipped` with Neo4j loaded · `85 passed, 1 skipped` with `RUN_UI_TESTS=1` |
 
 ---
 
@@ -581,7 +592,7 @@ substitute your own admin command, or use the `timetable` user.)
 
 | Symptom | Cause and fix |
 |---|---|
-| `Segmentation fault` right after `import pandas` / when Streamlit starts | A pandas + pyarrow crash seen when running inside the **Flatpak build of VS Code** (its terminal is a sandbox; pandas alone works, pandas with pyarrow crashes). Run `streamlit` from a normal system terminal outside VS Code. `bash tools/probe_pandas.sh` diagnoses it. The generator, ETL and queries do not use pandas and work anywhere |
+| `Segmentation fault` right after `import pandas` / when Streamlit starts | A pandas + pyarrow crash seen when running inside the **Flatpak build of VS Code** (its terminal is a sandbox; pandas alone works, pandas with pyarrow crashes). Run `streamlit` (and `RUN_UI_TESTS=1 pytest -m ui`) from a normal system terminal outside VS Code. `bash tools/probe_pandas.sh` diagnoses it. The generator, ETL, Neo4j queries and the default `pytest` run do not need pandas and work anywhere. *The Neo4j driver itself loads pandas and pyarrow when they are installed; `utils.get_neo4j_driver` keeps them out so the Neo4j tools keep working in such a terminal* |
 | `ImportError ... GLIBC_x.y not found` from the system Python | Half-finished system upgrade (seen on Arch). Finish with a full `sudo pacman -Syu` (never `-Sy` alone) and reboot, or use a `uv`-provided Python (`uv venv --python 3.12`) |
 | `uv: command not found` | `uv` lives in `~/.local/bin`; add it to `PATH` or call `~/.local/bin/uv` |
 | Environment variables do not stick / different syntax in bash vs fish vs PowerShell | Put everything in `.env`; the code reads it in every shell |
@@ -595,12 +606,48 @@ substitute your own admin command, or use the `timetable` user.)
 
 ## Tests
 
-Automated tests (`tests/`) are the next planned addition: they will verify that a generated timetable has no
-clashes, that the database constraints reject invalid rows, and that the Neo4j counts match MySQL. Until they
-land, use the [verification checklist](#verify-your-installation) above, which covers the same ground by hand.
-The interactive pieces were already exercised during development with Streamlit's headless `AppTest`
-harness, the Cypher with a syntax linter, and the ETL against a recording stand-in server; the
-generator, ETL and queries were also run against real MariaDB/MySQL and Neo4j 5.26.0.
+```bash
+pip install -r requirements-dev.txt          # adds pytest
+pytest                                       # everything that can run (needs MySQL + .env)
+pytest -m neo4j                              # only the live-Neo4j checks (Neo4j running, ETL done)
+RUN_UI_TESTS=1 pytest -m ui                  # Streamlit smoke tests, opt-in (see below)
+```
+
+PowerShell: `$env:RUN_UI_TESTS=1; pytest -m ui` · fish: `env RUN_UI_TESTS=1 pytest -m ui`.
+
+**Safety:** the tests never change your real timetable. Anything that writes uses a throw-away academic year
+(`2099-2100`, wiped before and after) or a transaction that is rolled back; the Neo4j tests only read.
+
+| File | What it proves |
+|---|---|
+| `test_schema.py` | Object counts and seed sizes; `CHECK` constraints; a room, teacher or section **cannot be double-booked** (errors named by constraint); the **triggers** reject a too-small room and a wrong room type (5001/5002) and a wrong semester (5003); a teacher must be in `Teaches` and a course in the section's plan (composite FKs); a `Teaches` row in use cannot be deleted; `sp_list_clashes` catches drift the triggers cannot see |
+| `test_generator.py` | A complete timetable is found; an **independent checker** (written from the raw tables, not from generator internals) confirms every hard rule and the exact weekly hours; soft constraints met on the seed data; labs consecutive and never across lunch; same seed ⇒ same result; saved timetable passes `sp_list_clashes` and `sp_hours_coverage` with zero rows; refuses to overwrite; a bad row **rolls back the whole save**; impossible input is explained, not crashed on |
+| `test_etl_offline.py` | Without Neo4j: constraints are created first, nodes before relationships, the old timetable is deleted before reload, rows sent equal the MySQL counts, batches never exceed 500 |
+| `test_neo4j_live.py` | With Neo4j: every node/relationship count equals MySQL; `CONFLICTS_WITH` built in Neo4j **equals** the SQL definition; workload totals, absence plans, free rooms, shortest paths and the move-ripple agree with MySQL |
+| `test_utils.py` | Times, lunch-aware slot links, the weekly grid and its HTML escaping, error wording, `.env` parsing, masked password report, all 12 queries load and each wrapper passes exactly the parameters its query uses, and importing the Neo4j driver never loads pandas or pyarrow |
+| `test_project_files.py` | Required files exist; every setting the code reads is in `.env.example`; `.env` is git-ignored; `sql/03_seed_data.sql` is byte-identical to what `tools/make_seed.py` generates; the README's options, links and file names are real |
+| `test_ui.py` | Every page of the web app loads and the grid shows the timetable (opt-in; imports pandas) |
+
+**Expected result on the bundled data:**
+
+| Situation | Summary line |
+|---|---|
+| MySQL only (no Neo4j, UI not enabled) | `70 passed, 16 skipped` |
+| + Neo4j running with the graph loaded | `77 passed, 9 skipped` |
+| + `RUN_UI_TESTS=1` | `85 passed, 1 skipped` |
+
+The one remaining skip is `test_cypher_files_have_valid_syntax`, which needs the optional `cypher-lint` tool
+(Debian/Ubuntu: `sudo apt install cypher-lint`); with it installed that test runs too.
+
+Skips are explained in the summary (`-ra`): "Neo4j not reachable", "graph is empty, run the ETL", or "UI tests are opt-in".
+Skipped is not failed, but it also means **not checked**: run the Neo4j tests at least once.
+
+*UI tests and the Flatpak VS Code terminal:* they import pandas, which crashes inside that terminal (see
+Troubleshooting). Run them from a normal terminal. A crash cannot be caught by pytest, which is why they are opt-in.
+
+*Do the tests really catch mistakes?* Checked by sabotage: dropping the `fk_tt_teaches` foreign key, the capacity
+trigger, the unique key on teachers, or changing the seed data each made the matching tests fail.
+The live-Neo4j tests pass against a real Neo4j 5.26.0 (verified on Arch Linux with MariaDB).
 
 ## Status and limitations
 
@@ -609,9 +656,9 @@ generator, ETL and queries were also run against real MariaDB/MySQL and Neo4j 5.
 | Schema, migration, views, procedures, seed data | Done; verified on MySQL 8.0 and MariaDB |
 | Scheduler | Done; verified on MySQL 8.0 and MariaDB |
 | Neo4j ETL and queries | Done; verified on Neo4j 5.26.0 |
-| Web app | Done; headless-tested; works when run from a normal terminal |
+| Web app | Done; headless-tested and seen working in a browser; run it from a normal terminal |
 | Docker Compose | Written; syntax-checked, not run yet |
-| Automated test suite | Planned |
+| Automated test suite | Done: 77 tests pass with MariaDB + Neo4j 5.26.0 on the author's machine (70 need only MySQL); UI tests are opt-in |
 
 Known limitations (by design, for a mini-project):
 
@@ -630,6 +677,7 @@ Known limitations (by design, for a mini-project):
 ## Working in a team
 
 - Copy `.env.example` to `.env` and use your own passwords. **Never commit `.env`** (it is git-ignored).
+- Run `pytest` before you commit; add a test with every rule you add.
 - Change the database through **new migration files** (`sql/05_...sql`), not by editing the applied ones.
 - Teammates can use different servers (MySQL vs MariaDB): everything uses standard SQL and the portable
   `source` loading command.

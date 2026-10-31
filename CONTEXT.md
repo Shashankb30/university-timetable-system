@@ -1,9 +1,9 @@
 # CONTEXT.md: University Timetable Generation System (handoff file)
 
 > **How to use:** start a new chat, attach this file (plus the `sql/` files if you
-> have them), and say: *"Read CONTEXT.md. Finish Step 6 (tests + final verification checklist)."*
+> have them), and say: *"Read CONTEXT.md. The project is complete; ask me what to improve (see 5f 'Possible next work')."*
 > You can also copy it to `CLAUDE.md` if you use Claude Code in this folder.
-> Last updated after **Step 5 complete + most of Step 6 (README, requirements, .env.example, docker-compose)**.
+> Last updated after **Step 6 complete** (all six steps done).
 
 ---
 
@@ -53,7 +53,7 @@ project/
 | 3 | Timetable generator (`src/generator.py`, `db.py`, `utils.py`) | **Done, tested on MySQL 8.0** |
 | 4 | Neo4j layer (ETL, constraints, 12 Cypher queries, Python wrappers) | **Done, verified on the user's live Neo4j 5.26.0** (see 5c) |
 | 5 | Streamlit app (`app/streamlit_app.py`) | **Done**, tested headlessly (see 5d); not yet seen in the user's browser |
-| 6 | Tooling: docker-compose, requirements, .env.example, tests, README, final checklist | **Partly done**: README, requirements.txt, .env.example, docker-compose.yml written (see 5e). **Remaining: `tests/` and a final end-to-end checklist** |
+| 6 | Tooling: docker-compose, requirements, .env.example, tests, README, final checklist | **Done** (see 5e, 5f). Docker compose and the live-Neo4j tests are written but never run |
 
 Files delivered so far: `sql/01_schema.sql`, `sql/02_migration_improvements.sql`,
 `sql/03_seed_data.sql`, `sql/04_views_procedures.sql`, `tools/make_seed.py`, `src/db.py`, `src/utils.py`, `src/generator.py`, `cypher/constraints.cypher`, `cypher/queries.cypher`,
@@ -195,6 +195,25 @@ tested with Streamlit 1.66.1 / pandas 3.0.2). Reads MySQL via `db.py`; Neo4j is 
 - **Still to do for Step 6:** `tests/` (pytest; core tests must stay pandas-free; UI tests opt-in via `RUN_UI_TESTS=1`; tests = no clashes, constraints enforced incl. error codes 5001/5002/5003/1062/1452,
   ETL counts match MySQL, `expected_counts`/`compare_counts` and `utils.build_conflict_graph` vs Neo4j CONFLICTS_WITH, grid builder, `check_proposed_class`), add pytest to a dev requirements section,
   update the README "Tests" section and status table, then a final end-to-end verification checklist message.
+
+## 5f. Step 6 completion: tests
+- `pytest.ini`, `requirements-dev.txt` (adds `pytest>=8.0`), `tests/` with `conftest.py` + 7 test files (see README "Tests" for the table).
+- **Safety rules:** tests never touch real data: writes use `TEST_YEAR = "2099-2100"` (wiped before/after by a fixture) or run in a rolled-back transaction (`conn` fixture); Neo4j tests only read.
+  `db.connect()` failure => tests FAIL with a clear message (not skip). Neo4j tests skip when Neo4j is down or the graph is empty. UI tests (`-m ui`) are skipped unless `RUN_UI_TESTS=1`.
+- **Results in the sandbox (MySQL 8.0):** `71 passed, 15 skipped` (7 live-Neo4j + 8 UI); with `RUN_UI_TESTS=1 pytest -m ui`: 8 passed. Expected with Neo4j loaded: 78 passed / 8 skipped; everything: 86.
+  **User's first real run (Arch + MariaDB, VS Code Flatpak terminal):** test_etl_offline (7) and test_generator (18) PASSED on MariaDB; then `pytest` segfaulted in `test_neo4j_live` because `import neo4j` imports pandas when installed
+  (pandas was installed with Streamlit) and pandas+pyarrow crashes in that terminal. **First fix** blocked only pandas: the crash moved to the driver's next optional import (pyarrow, `neo4j/_optional_deps.py` line 45).
+  **Fix:** `utils._import_neo4j()` blocks the driver's optional pandas AND pyarrow imports (temporary `sys.modules[...]=None`, removed afterwards);
+  regression test `test_neo4j_driver_import_does_not_load_pandas_or_pyarrow`.
+  **VERIFIED ON THE USER'S MACHINE (Arch + MariaDB + Neo4j 5.26.0, Flatpak VS Code terminal):** `python src/neo4j_etl.py` -> `Verification: OK`; `pytest` -> **77 passed, 9 skipped**
+  (the 7 live-Neo4j tests PASS; skips = 8 opt-in UI tests + 1 optional `cypher-lint` test). `.env.example` now exists (user pasted it). Counts without cypher-lint: MySQL only 70 passed/16 skipped; with Neo4j 77/9; with RUN_UI_TESTS=1 85 passed/1 skipped.
+- **Mutation-checked:** dropping `fk_tt_teaches`, the trigger `trg_tt_validate_bi`, the unique key `uq_faculty_slot`, or altering seed data made the matching tests fail; the pristine DB passes.
+- **Never run by anyone:** Docker compose; the macOS/Windows instructions; `RUN_UI_TESTS=1 pytest -m ui` on the user's machine (needs a normal, non-Flatpak terminal). Live-Neo4j tests: PASSED on the user's machine.
+- `db.call_procedure` now works with mysql-connector's deprecated `stored_results()` method AND the announced property form (26.7.0 warns).
+- **User's folder as of the last screenshot:** present = app, cypher, docker/mysql/00_app_user.sh, sql (4), src (5), tests (empty), tools/probe_pandas.sh, .env, .gitignore, CONTEXT.md, docker-compose.yml, README.md, requirements.txt, probe_output.txt (can delete).
+  **Missing:** `.env.example`, `tools/make_seed.py` (and now `pytest.ini`, `requirements-dev.txt`, `tests/*`). `tests/test_project_files.py` fails until these exist.
+- **Project state: COMPLETE and verified end to end on the user's machine, apart from the items above.**
+- **Possible next work:** run the live Neo4j tests and Docker compose once; apply a chosen substitute from the UI (UPDATE Timetable.faculty_id + ETL); student electives/backlogs; split lab batches; LICENSE; CI (GitHub Actions running `pytest` against a MySQL service container).
 
 ## 6. Schema (from the PDF, source of truth)
 Tables and columns (names must not change):

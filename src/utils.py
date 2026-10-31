@@ -225,9 +225,33 @@ def _silence_null_elimination_notice() -> None:
     _notification_filter_installed = True
 
 
+def _import_neo4j():
+    """
+    Import the neo4j driver WITHOUT letting it import pandas or pyarrow.
+
+    The driver optionally imports numpy, pandas and pyarrow (each inside a "skip if
+    missing" block) only for Result.to_df() / to_arrow(), which this project never uses.
+    On a machine where importing pandas/pyarrow crashes (seen inside the Flatpak build of
+    VS Code once Streamlit had installed them) that made every `import neo4j` crash too.
+    A temporary `sys.modules[name] = None` makes those optional imports fail harmlessly;
+    the entries are removed again afterwards so a later real `import pandas` (the web app)
+    still works. Faster import as a bonus. numpy is left alone: it is harmless.
+    """
+    import sys
+    blocked = [m for m in ("pandas", "pyarrow") if m not in sys.modules]
+    for m in blocked:
+        sys.modules[m] = None
+    try:
+        import neo4j
+    finally:
+        for m in blocked:
+            sys.modules.pop(m, None)
+    return neo4j
+
+
 def get_neo4j_driver():
     """Create a Neo4j driver from the settings above (imported lazily)."""
-    from neo4j import GraphDatabase
+    GraphDatabase = _import_neo4j().GraphDatabase
     _silence_null_elimination_notice()
     s = neo4j_settings()
     if not s["password"]:

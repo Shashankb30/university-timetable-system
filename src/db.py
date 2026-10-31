@@ -74,8 +74,12 @@ def call_procedure(conn, name: str, args=()) -> list[dict]:
     cur = conn.cursor(dictionary=True)
     try:
         cur.callproc(name, list(args))
+        # mysql-connector 26.x deprecates stored_results() in favour of a property of the
+        # same name; support both so a future upgrade does not break this.
+        results = cur.stored_results
+        results = results() if callable(results) else results
         rows: list[dict] = []
-        for result in cur.stored_results():
+        for result in results:
             rows = result.fetchall()
             break
         return rows
