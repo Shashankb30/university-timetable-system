@@ -171,7 +171,7 @@ LAST = ["Agarwal", "Balasubramanian", "Chopra", "Dutta", "Gupta", "Hegde",
         "Iyengar", "Joshi", "Krishnamurthy", "Kulkarni", "Mehta", "Mukherjee",
         "Nambiar", "Patel", "Prasad", "Rao", "Reddy", "Sharma", "Shetty",
         "Singh", "Thomas", "Varma", "Venkatesan", "Yadav"]
-combos = [(f, l) for f in FIRST for l in LAST]
+combos = [(first, last) for first in FIRST for last in LAST]
 rng.shuffle(combos)
 STUDENTS_PER_SECTION = 12
 STUDENTS = []
@@ -179,16 +179,16 @@ k = 0
 for sid, sname, sem, _strength, dept in SECTIONS:
     adm_year = 25 if sem == 3 else 24            # admission year of the batch
     for n in range(1, STUDENTS_PER_SECTION + 1):
-        f, l = combos[k]
+        first, last = combos[k]
         k += 1
         stu_id = f"UG{adm_year}{DEPT_CODE[dept]}{sem}{sname}{n:02d}"
-        STUDENTS.append((stu_id, f"{f} {l}",
+        STUDENTS.append((stu_id, f"{first} {last}",
                          stu_id.lower() + "@student.university.edu", sid))
 
 # ------------------------------------------------- section plans + enrollment
 SECTION_COURSE = []
 ENROLLMENT = []
-for sid, sname, sem, _s, dept in SECTIONS:
+for sid, _sname, sem, _s, dept in SECTIONS:
     for cid in PLAN[(dept, sem)]:
         SECTION_COURSE.append((sid, cid, sem))
 for stu_id, _n, _e, sid in STUDENTS:

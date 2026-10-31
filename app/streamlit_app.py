@@ -100,6 +100,13 @@ def available_years() -> list[str]:
     return years
 
 
+def section_options() -> list[dict]:
+    """Sections as {id, label} rows for select boxes, e.g. 'Computer Science ... / Sem 3 / A'."""
+    return sql("SELECT s.section_id AS id, CONCAT(d.dept_name, ' / Sem ', s.semester, ' / ', s.section_name) "
+               "AS label FROM Section s JOIN Department d ON d.dept_id = s.dept_id "
+               "ORDER BY d.dept_name, s.semester, s.section_name")
+
+
 def timetable_rows(year: str) -> int:
     return sql("SELECT COUNT(*) AS n FROM Timetable WHERE academic_year = %s", (year,))[0]["n"]
 
@@ -157,9 +164,7 @@ def page_timetable(year: str) -> None:
     slots = sql("SELECT slot_id, day_of_week, period_no, start_time, end_time FROM TimeSlot ORDER BY slot_id")
 
     if view == "Section":
-        opts = sql("SELECT s.section_id AS id, CONCAT(d.dept_name, ' / Sem ', s.semester, ' / ', "
-                   "s.section_name) AS label FROM Section s JOIN Department d ON d.dept_id = s.dept_id "
-                   "ORDER BY d.dept_name, s.semester, s.section_name")
+        opts = section_options()
         col, line_fn = "section_id", lambda r: [r["course_id"], r["faculty_name"], f"{r['building']} {r['room_no']}"]
     elif view == "Faculty":
         opts = sql("SELECT f.faculty_id AS id, CONCAT(f.name, ' (', d.dept_name, ')') AS label "
@@ -353,9 +358,7 @@ def _tab_saved(year: str) -> None:
 def _tab_proposal(year: str) -> None:
     st.caption("Test a class without saving it: every rule MySQL enforces is checked, plus the "
                "weekly-hours rule.")
-    secs = sql("SELECT s.section_id AS id, CONCAT(d.dept_name, ' / Sem ', s.semester, ' / ', s.section_name) "
-               "AS label FROM Section s JOIN Department d ON d.dept_id = s.dept_id "
-               "ORDER BY d.dept_name, s.semester, s.section_name")
+    secs = section_options()
     crs = sql("SELECT course_id AS id, CONCAT(course_id, ' ', course_name, ' (', course_type, ')') AS label "
               "FROM Course ORDER BY course_id")
     fac = sql("SELECT faculty_id AS id, name AS label FROM Faculty ORDER BY name")
@@ -390,10 +393,7 @@ def _tab_proposal(year: str) -> None:
 def _tab_ripple(year: str) -> None:
     st.caption("Uses Neo4j: if you move a class to another slot (keeping faculty, section and room), "
                "which existing classes collide and how many students are displaced?")
-    secs = sql("SELECT s.section_id AS id, CONCAT(d.dept_name, ' / Sem ', s.semester, ' / ', s.section_name) "
-               "AS label FROM Section s JOIN Department d ON d.dept_id = s.dept_id "
-               "ORDER BY d.dept_name, s.semester, s.section_name")
-    labels = {r["id"]: r["label"] for r in secs}
+    labels = {r["id"]: r["label"] for r in section_options()}
     section = st.selectbox("Section whose class you want to move", list(labels), format_func=labels.get,
                            key="ripple_section")
     classes = _clean(sql("SELECT t.timetable_id, ts.day_of_week, ts.period_no, t.course_id, f.name AS faculty "

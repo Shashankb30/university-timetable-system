@@ -1,0 +1,13 @@
+# Lint settings (CI runs `ruff check .`).  Install: pip install ruff
+target-version = "py311"
+line-length = 120
+
+[lint]
+select = ["E4", "E7", "E9", "F", "W", "B", "I"]
+ignore = [
+    "E731",   # short lambdas assigned to names are used deliberately for one-line helpers
+    "B905",   # zip(a, a[1:]) pairs intentionally have different lengths
+]
+
+[lint.isort]
+known-first-party = ["db", "generator", "neo4j_etl", "neo4j_queries", "utils", "conftest"]

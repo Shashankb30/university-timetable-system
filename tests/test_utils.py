@@ -1,5 +1,4 @@
 """Pure-Python helpers and the Cypher query file. No database needed."""
-import os
 import re
 import shutil
 import subprocess
@@ -116,10 +115,17 @@ def test_all_documented_queries_are_loaded():
 def test_every_wrapper_passes_exactly_the_parameters_its_query_uses(monkeypatch):
     calls = []
     monkeypatch.setattr(NQ, "run_query", lambda name, params=None, session=None: calls.append((name, dict(params or {}))) or [])
-    NQ.impact_analysis(1, "2026-2027", "mon"); NQ.substitute_finder(1); NQ.most_conflicted_courses()
-    NQ.free_rooms("MON", 1, 60, "lecture"); NQ.heaviest_day_students(); NQ.faculty_shortest_path(1, 11)
-    NQ.faculty_workload_ranking(); NQ.cross_department_teaching(); NQ.course_conflict_neighbours("CS301")
-    NQ.node_counts(); NQ.relationship_counts()
+    NQ.impact_analysis(1, "2026-2027", "mon")
+    NQ.substitute_finder(1)
+    NQ.most_conflicted_courses()
+    NQ.free_rooms("MON", 1, 60, "lecture")
+    NQ.heaviest_day_students()
+    NQ.faculty_shortest_path(1, 11)
+    NQ.faculty_workload_ranking()
+    NQ.cross_department_teaching()
+    NQ.course_conflict_neighbours("CS301")
+    NQ.node_counts()
+    NQ.relationship_counts()
     with pytest.raises(LookupError):
         NQ.move_class_ripple(1, "FRI", 8)
     assert {n for n, _ in calls} == EXPECTED_QUERIES
