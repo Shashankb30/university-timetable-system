@@ -80,6 +80,7 @@ university-timetable-system/
 │   ├── constraints.cypher        uniqueness constraints and indexes
 │   └── queries.cypher            the documented queries (single source of truth)
 ├── app/streamlit_app.py          the web UI
+├── docs/er-diagram-chen.png      the Chen ER diagram as a rendered image
 ├── docker/mysql/00_app_user.sh   creates the app DB user inside the container
 ├── tools/
 │   ├── make_seed.py              regenerates sql/03_seed_data.sql (optional)
@@ -409,20 +410,95 @@ The supplied Chen ER diagram maps to tables with three standard rules:
   attribute: `Timetable(course, faculty, room, slot, section, academic_year)`.
 
 ```mermaid
-erDiagram
-    DEPARTMENT ||--o{ FACULTY : "works in"
-    DEPARTMENT ||--o{ COURSE : "offers"
-    DEPARTMENT ||--o{ SECTION : "has"
-    SECTION    ||--o{ STUDENT : "studies in"
-    FACULTY    }o--o{ COURSE : "teaches"
-    STUDENT    }o--o{ COURSE : "enrolled in"
-    SECTION    }o--o{ COURSE : "takes (Section_Course)"
-    TIMETABLE  }o--|| COURSE : ""
-    TIMETABLE  }o--|| FACULTY : ""
-    TIMETABLE  }o--|| CLASSROOM : ""
-    TIMETABLE  }o--|| TIMESLOT : ""
-    TIMETABLE  }o--|| SECTION : ""
+flowchart TB
+    %% Entities (rectangles)
+    DEPT[Department]
+    FAC[Faculty]
+    CRS[Course]
+    SEC[Section]
+    STU[Student]
+    ROOM[Classroom]
+    SLOT[TimeSlot]
+
+    %% Relationships (diamonds)
+    WORKS{Works_In}
+    OFFERED{Offered_By}
+    BELONGS{Belongs_To}
+    STUDIES{Studies_In}
+    TEACHES{Teaches}
+    ENROLLED{Enrolled_In}
+    TAKES{"Takes (M1)"}
+    SCHED{Scheduled_In}
+
+    %% Attributes (ovals), key attributes underlined
+    d1(["<u>dept_id</u>"]) --- DEPT
+    d2([dept_name]) --- DEPT
+    d3([building]) --- DEPT
+
+    f1(["<u>faculty_id</u>"]) --- FAC
+    f2([name]) --- FAC
+    f3([email]) --- FAC
+
+    c1(["<u>course_id</u>"]) --- CRS
+    c2([course_name]) --- CRS
+    c3([credits]) --- CRS
+    c4([weekly_hours]) --- CRS
+    c5([course_type]) --- CRS
+
+    s1(["<u>section_id</u>"]) --- SEC
+    s2([section_name]) --- SEC
+    s3([semester]) --- SEC
+    s4([strength]) --- SEC
+
+    st1(["<u>student_id</u>"]) --- STU
+    st2([name]) --- STU
+    st3([email]) --- STU
+
+    r1(["<u>room_id</u>"]) --- ROOM
+    r2([room_no]) --- ROOM
+    r3([building]) --- ROOM
+    r4([capacity]) --- ROOM
+    r5([room_type]) --- ROOM
+
+    t1(["<u>slot_id</u>"]) --- SLOT
+    t2([day_of_week]) --- SLOT
+    t3([period_no]) --- SLOT
+    t4([start_time]) --- SLOT
+    t5([end_time]) --- SLOT
+
+    %% Relationship attributes
+    SCHED --- a1([academic_year])
+    TAKES --- a2([semester])
+
+    %% 1:N relationships (thick line = total participation)
+    DEPT ---|1| WORKS
+    WORKS ===|N| FAC
+    DEPT ---|1| OFFERED
+    OFFERED ===|N| CRS
+    DEPT ---|1| BELONGS
+    BELONGS ===|N| SEC
+    SEC ---|1| STUDIES
+    STUDIES ===|N| STU
+
+    %% M:N relationships
+    FAC ---|M| TEACHES
+    TEACHES ---|N| CRS
+    STU ---|M| ENROLLED
+    ENROLLED ---|N| CRS
+    SEC ---|M| TAKES
+    TAKES ---|N| CRS
+
+    %% 5-ary relationship (stored as the Timetable table)
+    SCHED ---|N| CRS
+    SCHED ---|N| FAC
+    SCHED ---|N| ROOM
+    SCHED ---|N| SLOT
+    SCHED ---|N| SEC
 ```
+
+*Chen notation: rectangles are entities, diamonds are relationships, ovals are attributes (key attributes underlined). Edge labels give the cardinality; a thick line means total participation (every Faculty, Course, Section and Student must belong to one). `Takes` is the `Section_Course` table added by migration M1; `Scheduled_In` is stored as the `Timetable` table.*
+
+Rendered image: [`docs/er-diagram-chen.png`](docs/er-diagram-chen.png) (for slides, reports or viewers without Mermaid).
 
 *(In the original drawing, Offered_By and Belongs_To appear to attach to Faculty; the relational schema
 in the PDF uses `dept_id` on Course and Section, which is what this project follows.)*
