@@ -308,8 +308,8 @@ def main(argv=None) -> int:
     cmd = args[0]
     if cmd == "list":
         for name, text in queries().items():
-            first = next((l.lstrip("/ ").strip() for l in text.splitlines()
-                          if l.strip().startswith("//")), "")
+            first = next((line.lstrip("/ ").strip() for line in text.splitlines()
+                          if line.strip().startswith("//")), "")
             print(f"{name:28s} {first}")
         return 0
     if cmd == "check":                      # diagnose connection / password problems

@@ -19,9 +19,9 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-import db          # noqa: E402  (also loads .env)
-import generator   # noqa: E402
-import utils       # noqa: E402
+import db  # noqa: E402  (also loads .env)
+import generator  # noqa: E402
+import utils  # noqa: E402
 
 TEST_YEAR = "2099-2100"          # VARCHAR(9); never used for real data
 

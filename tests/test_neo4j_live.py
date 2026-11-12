@@ -13,8 +13,9 @@ pytestmark = pytest.mark.neo4j
 
 
 def test_graph_counts_match_mysql(conn, year, graph_loaded):
-    """Every node and relationship count equals what MySQL says it should be."""
-    problems = E.compare_counts(E.expected_counts(conn, [year]), E.actual_counts(graph_loaded))
+    """Every node and relationship count equals what MySQL says it should be (for every year in the graph)."""
+    years = sorted({year} | set(E.graph_years(graph_loaded)))
+    problems = E.compare_counts(E.expected_counts(conn, years), E.actual_counts(graph_loaded))
     assert problems == [], "graph differs from MySQL: re-run `python src/neo4j_etl.py`\n" + "\n".join(problems)
 
 

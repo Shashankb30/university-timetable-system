@@ -179,7 +179,7 @@ class Problem:
 
     # rooms that satisfy hard room constraints for (section, course), best fit first
     def eligible_rooms(self, section_id: int, course_id: str) -> list[int]:
-        need = "LAB" if self.courses[course_id]["course_type"] == "LAB" else "LECTURE"
+        need = self.room_need(course_id)
         strength = self.sections[section_id]["strength"]
         ok = [r for r in self.rooms if r["room_type"] == need and r["capacity"] >= strength]
         ok.sort(key=lambda r: (r["capacity"], r["room_id"]))
@@ -620,6 +620,86 @@ def check_proposed_class(conn, academic_year: str, section_id: int, course_id: s
     return out
 
 
+# ------------------------------------------------------- substitute assignment
+class SubstitutionError(Exception):
+    """Raised when a class cannot be reassigned (carries a plain-English reason)."""
+
+
+def assign_substitute(conn, timetable_id: int, faculty_id: int, *, add_teaches: bool = False,
+                      _drop_teaches: tuple | None = None) -> dict:
+    """
+    Hand one saved class (a Timetable row) to another faculty member, in ONE transaction.
+
+    This changes the weekly timetable (Timetable.faculty_id), i.e. it is a reassignment,
+    not a one-day cover. Rules (checked here for a friendly message, and enforced again by
+    MySQL: uq_faculty_slot, fk_tt_teaches, the BEFORE UPDATE trigger):
+      - the new faculty member must be free in that slot of that academic year;
+      - they must be listed in Teaches for the course. A RELATED candidate (from the
+        Neo4j substitute finder) is not: pass add_teaches=True to insert that Teaches
+        row in the same transaction.
+    Returns a change record; pass it to revert_substitution() to undo. Refresh the Neo4j
+    graph afterwards (neo4j_etl.run_etl(year)) so the graph tools see the change.
+    """
+    def one(sql, params):
+        rows = db.query(conn, sql, params)
+        return rows[0] if rows else None
+
+    cls = one("SELECT t.timetable_id, t.course_id, t.faculty_id, t.slot_id, t.section_id, t.academic_year, "
+              "f.name AS faculty_name FROM Timetable t JOIN Faculty f ON f.faculty_id = t.faculty_id "
+              "WHERE t.timetable_id = %s", (timetable_id,))
+    if cls is None:
+        raise SubstitutionError(f"no saved class with timetable_id={timetable_id}")
+    new = one("SELECT faculty_id, name FROM Faculty WHERE faculty_id = %s", (faculty_id,))
+    if new is None:
+        raise SubstitutionError(f"unknown faculty_id={faculty_id}")
+    if new["faculty_id"] == cls["faculty_id"]:
+        raise SubstitutionError(f"{new['name']} already teaches this class")
+    busy = one("SELECT course_id, section_id FROM Timetable WHERE academic_year = %s AND slot_id = %s "
+               "AND faculty_id = %s", (cls["academic_year"], cls["slot_id"], faculty_id))
+    if busy:
+        raise SubstitutionError(f"{new['name']} already teaches {busy['course_id']} (section "
+                                f"{busy['section_id']}) in that slot")
+    qualified = one("SELECT 1 AS x FROM Teaches WHERE faculty_id = %s AND course_id = %s",
+                    (faculty_id, cls["course_id"])) is not None
+    if not qualified and not add_teaches:
+        raise SubstitutionError(f"{new['name']} is not listed in Teaches for {cls['course_id']}; "
+                                "add the Teaches row first (add_teaches=True)")
+
+    conn.rollback()                      # end the read snapshot; the writes below are one transaction
+    cur = conn.cursor()
+    try:
+        if not qualified:
+            cur.execute("INSERT INTO Teaches (faculty_id, course_id) VALUES (%s, %s)",
+                        (faculty_id, cls["course_id"]))
+        # "AND faculty_id = old" guards against someone else having changed the row meanwhile
+        cur.execute("UPDATE Timetable SET faculty_id = %s WHERE timetable_id = %s AND faculty_id = %s",
+                    (faculty_id, timetable_id, cls["faculty_id"]))
+        if cur.rowcount != 1:
+            raise SubstitutionError("the class was changed by someone else; reload and try again")
+        if _drop_teaches:                # used by revert_substitution: remove the row it added
+            cur.execute("DELETE FROM Teaches WHERE faculty_id = %s AND course_id = %s", _drop_teaches)
+        conn.commit()
+    except mysql.connector.Error as exc:
+        conn.rollback()
+        raise SubstitutionError(utils.describe_mysql_error(exc)) from exc
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+    return {"timetable_id": timetable_id, "academic_year": cls["academic_year"],
+            "course_id": cls["course_id"], "section_id": cls["section_id"], "slot_id": cls["slot_id"],
+            "old_faculty_id": cls["faculty_id"], "old_faculty": cls["faculty_name"],
+            "new_faculty_id": new["faculty_id"], "new_faculty": new["name"],
+            "teaches_added": not qualified}
+
+
+def revert_substitution(conn, change: dict) -> dict:
+    """Undo assign_substitute(): give the class back and drop the Teaches row it added (one transaction)."""
+    drop = (change["new_faculty_id"], change["course_id"]) if change["teaches_added"] else None
+    return assign_substitute(conn, change["timetable_id"], change["old_faculty_id"], _drop_teaches=drop)
+
+
 # ------------------------------------------------------------- main entry
 def generate_timetable(academic_year: str | None = None, *, replace: bool = False,
                        allow_partial: bool = False, dry_run: bool = False,
@@ -651,12 +731,13 @@ def generate_timetable(academic_year: str | None = None, *, replace: bool = Fals
 
         solution = None
         deadline = t0 + time_limit
-        for attempt in range(max(1, restarts)):
+        attempts = max(1, restarts)                   # restarts=0 still means one attempt
+        for attempt in range(attempts):
             now = time.monotonic()
-            share = (deadline - now) / (restarts - attempt)
+            share = (deadline - now) / (attempts - attempt)
             sched = Scheduler(P, random.Random(seed + attempt))
             ordered = sched.order_tasks(tasks, jitter=0.0 if attempt == 0 else 0.4)
-            solution, nodes = sched.solve(ordered, max_nodes // max(1, restarts), now + share)
+            solution, nodes = sched.solve(ordered, max_nodes // attempts, now + share)
             res.nodes += nodes
             res.attempts = attempt + 1
             if solution is not None:

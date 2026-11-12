@@ -100,18 +100,33 @@ def available_years() -> list[str]:
     return years
 
 
+def section_options() -> list[dict]:
+    """Sections as {id, label} rows for select boxes, e.g. 'Computer Science ... / Sem 3 / A'."""
+    return sql("SELECT s.section_id AS id, CONCAT(d.dept_name, ' / Sem ', s.semester, ' / ', s.section_name) "
+               "AS label FROM Section s JOIN Department d ON d.dept_id = s.dept_id "
+               "ORDER BY d.dept_name, s.semester, s.section_name")
+
+
 def timetable_rows(year: str) -> int:
     return sql("SELECT COUNT(*) AS n FROM Timetable WHERE academic_year = %s", (year,))[0]["n"]
 
 
 def graph_stale_message(year: str) -> str | None:
-    """Compare the Neo4j graph with MySQL for `year`; None when equal or Neo4j unreachable."""
+    """
+    Compare the Neo4j graph with MySQL for `year`: classes per faculty member, so a
+    reassigned class (same total, different teacher) is noticed too. None when equal
+    or when Neo4j is unreachable.
+    """
     rows, err = run_neo4j(neo4j_queries.faculty_workload_ranking, year)
     if err:
         return None
-    in_graph, in_mysql = sum(r["periods"] for r in rows), timetable_rows(year)
+    in_graph = {r["faculty_id"]: r["periods"] for r in rows if r["periods"]}
+    in_mysql = {r["faculty_id"]: r["n"] for r in sql(
+        "SELECT faculty_id, COUNT(*) AS n FROM Timetable WHERE academic_year = %s GROUP BY faculty_id", (year,))}
     if in_graph != in_mysql:
-        return (f"The Neo4j graph has {in_graph} classes for {year} but MySQL has {in_mysql}. "
+        differ = len(set(in_graph.items()) ^ set(in_mysql.items()))
+        return (f"The Neo4j graph differs from MySQL for {year} (graph: {sum(in_graph.values())} classes, "
+                f"MySQL: {sum(in_mysql.values())}; {differ} per-faculty count(s) differ). "
                 "Results below may be out of date.")
     return None
 
@@ -136,6 +151,30 @@ def etl_button(year: str, key: str) -> None:
             st.code("\n".join(lines))
 
 
+def apply_substitution(action, year: str, done: str) -> None:
+    """
+    Run a substitution change (`action(conn)` -> change record) against MySQL, then refresh
+    the Neo4j graph for `year` so the absence plan reflects it. The outcome is kept in
+    session state (shown by page_absent, with an Undo button) and the page reruns.
+    Raises generator.SubstitutionError if MySQL refuses the change.
+    """
+    with db.connection() as conn:
+        change = action(conn)
+    st.cache_data.clear()
+    graph = None
+    with st.spinner("Updating the Neo4j graph ..."):
+        try:
+            result = neo4j_etl.run_etl(year, log=lambda *_: None)
+            if not result["ok"]:
+                graph = "Neo4j graph does not match MySQL: " + "; ".join(result["problems"])
+        except Exception as exc:                   # noqa: BLE001 -- MySQL is already updated
+            graph = f"MySQL is updated, but refreshing Neo4j failed ({type(exc).__name__}: {exc})."
+        finally:
+            neo4j_queries.close_driver()
+    st.session_state["last_substitution"] = {"change": change, "done": done, "graph_problem": graph}
+    st.rerun()
+
+
 # =============================================================== sidebar
 def sidebar() -> tuple[str, str]:
     st.sidebar.title("🗓️ Timetable System")
@@ -157,9 +196,7 @@ def page_timetable(year: str) -> None:
     slots = sql("SELECT slot_id, day_of_week, period_no, start_time, end_time FROM TimeSlot ORDER BY slot_id")
 
     if view == "Section":
-        opts = sql("SELECT s.section_id AS id, CONCAT(d.dept_name, ' / Sem ', s.semester, ' / ', "
-                   "s.section_name) AS label FROM Section s JOIN Department d ON d.dept_id = s.dept_id "
-                   "ORDER BY d.dept_name, s.semester, s.section_name")
+        opts = section_options()
         col, line_fn = "section_id", lambda r: [r["course_id"], r["faculty_name"], f"{r['building']} {r['room_no']}"]
     elif view == "Faculty":
         opts = sql("SELECT f.faculty_id AS id, CONCAT(f.name, ' (', d.dept_name, ')') AS label "
@@ -269,6 +306,7 @@ def page_absent(year: str) -> None:
     day = b.selectbox("Absent on", ["Whole week"] + DAYS)
     day_arg = None if day == "Whole week" else day
 
+    _last_substitution()
     stale = graph_stale_message(year)
     if stale:
         st.warning(stale)
@@ -302,6 +340,8 @@ def page_absent(year: str) -> None:
                        file_name=f"absence_plan_faculty{fid}_{year}.csv", mime="text/csv")
 
     st.subheader("Substitute candidates per class")
+    st.caption("Assigning hands the class to the substitute in the saved weekly timetable (every week, "
+               "not just one day) and refreshes the Neo4j graph. You can undo it.")
     for c in plan["classes"]:
         title = f"{c['day']} P{c['period']}  {c['course_id']}  {c['section']}  -  {STATUS_ICON[c['status']]}"
         with st.expander(title):
@@ -311,6 +351,55 @@ def page_absent(year: str) -> None:
             st.dataframe(pd.DataFrame([{"Candidate": x["candidate"], "Fit": x["fit"],
                                         "Related courses taught": x["related_courses"]}
                                        for x in c["substitutes"]]), hide_index=True)
+            _assign_controls(c, year)
+
+
+def _assign_controls(c: dict, year: str) -> None:
+    """Pick a candidate for class `c` and assign them (QUALIFIED directly; RELATED after adding Teaches)."""
+    tid = c["timetable_id"]
+    subs = {x["candidate_id"]: x for x in c["substitutes"]}
+    pick = st.selectbox("Substitute", list(subs), key=f"sub_pick_{tid}",
+                        format_func=lambda i: f"{subs[i]['candidate']} ({subs[i]['fit']})")
+    cand = subs[pick]
+    needs_teaches = cand["fit"] != "QUALIFIED"
+    add_teaches = False
+    if needs_teaches:
+        add_teaches = st.checkbox(f"Also add {cand['candidate']} to Teaches for {c['course_id']} "
+                                  "(required: they are not yet listed as qualified)", key=f"sub_teaches_{tid}")
+    if st.button(f"Assign {cand['candidate']} to this class", key=f"sub_assign_{tid}",
+                 disabled=needs_teaches and not add_teaches):
+        try:
+            apply_substitution(lambda conn: generator.assign_substitute(conn, tid, pick, add_teaches=add_teaches),
+                               year, done="assigned")
+        except generator.SubstitutionError as exc:
+            st.error(f"Not assigned: {exc}")
+
+
+def _last_substitution() -> None:
+    """Report the most recent assignment / undo, with an Undo button for an assignment."""
+    last = st.session_state.get("last_substitution")
+    if not last:
+        return
+    ch = last["change"]
+    slot = sql("SELECT day_of_week, period_no FROM TimeSlot WHERE slot_id = %s", (ch["slot_id"],))[0]
+    what = (f"{ch['course_id']} (section {ch['section_id']}, {slot['day_of_week']} P{slot['period_no']}, "
+            f"{ch['academic_year']})")
+    if last["done"] == "assigned":
+        extra = f" Added {ch['new_faculty']} to Teaches for {ch['course_id']}." if ch["teaches_added"] else ""
+        st.success(f"{what} now taught by **{ch['new_faculty']}** instead of {ch['old_faculty']}.{extra}")
+    else:
+        st.info(f"Undone: {what} is taught by **{ch['new_faculty']}** again.")
+    if last["graph_problem"]:
+        st.warning(last["graph_problem"])
+    cols = iter(st.columns([1, 1, 6]))
+    if last["done"] == "assigned" and next(cols).button("Undo", key="sub_undo"):
+        try:
+            apply_substitution(lambda conn: generator.revert_substitution(conn, ch), ch["academic_year"], done="undone")
+        except generator.SubstitutionError as exc:
+            st.error(f"Could not undo: {exc}")
+    if next(cols).button("Dismiss", key="sub_dismiss"):
+        del st.session_state["last_substitution"]
+        st.rerun()
 
 
 # ============================================================ page: clash checker
@@ -353,9 +442,7 @@ def _tab_saved(year: str) -> None:
 def _tab_proposal(year: str) -> None:
     st.caption("Test a class without saving it: every rule MySQL enforces is checked, plus the "
                "weekly-hours rule.")
-    secs = sql("SELECT s.section_id AS id, CONCAT(d.dept_name, ' / Sem ', s.semester, ' / ', s.section_name) "
-               "AS label FROM Section s JOIN Department d ON d.dept_id = s.dept_id "
-               "ORDER BY d.dept_name, s.semester, s.section_name")
+    secs = section_options()
     crs = sql("SELECT course_id AS id, CONCAT(course_id, ' ', course_name, ' (', course_type, ')') AS label "
               "FROM Course ORDER BY course_id")
     fac = sql("SELECT faculty_id AS id, name AS label FROM Faculty ORDER BY name")
@@ -390,10 +477,7 @@ def _tab_proposal(year: str) -> None:
 def _tab_ripple(year: str) -> None:
     st.caption("Uses Neo4j: if you move a class to another slot (keeping faculty, section and room), "
                "which existing classes collide and how many students are displaced?")
-    secs = sql("SELECT s.section_id AS id, CONCAT(d.dept_name, ' / Sem ', s.semester, ' / ', s.section_name) "
-               "AS label FROM Section s JOIN Department d ON d.dept_id = s.dept_id "
-               "ORDER BY d.dept_name, s.semester, s.section_name")
-    labels = {r["id"]: r["label"] for r in secs}
+    labels = {r["id"]: r["label"] for r in section_options()}
     section = st.selectbox("Section whose class you want to move", list(labels), format_func=labels.get,
                            key="ripple_section")
     classes = _clean(sql("SELECT t.timetable_id, ts.day_of_week, ts.period_no, t.course_id, f.name AS faculty "

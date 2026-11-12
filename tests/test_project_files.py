@@ -4,14 +4,13 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 ROOT = Path(__file__).resolve().parent.parent
 REQUIRED = ["README.md", "requirements.txt", ".env.example", ".gitignore", "docker-compose.yml",
             "pytest.ini", "app/streamlit_app.py", "cypher/constraints.cypher", "cypher/queries.cypher",
             "docker/mysql/00_app_user.sh", "sql/01_schema.sql", "sql/02_migration_improvements.sql",
             "sql/03_seed_data.sql", "sql/04_views_procedures.sql", "src/db.py", "src/utils.py",
-            "src/generator.py", "src/neo4j_etl.py", "src/neo4j_queries.py", "tools/make_seed.py"]
+            "src/generator.py", "src/neo4j_etl.py", "src/neo4j_queries.py", "tools/make_seed.py",
+            "requirements-dev.txt", "ruff.toml", ".github/workflows/ci.yml"]
 
 
 def test_required_files_are_present():
@@ -47,11 +46,11 @@ def test_readme_matches_the_code():
     text = (ROOT / "README.md").read_text()
     code = (ROOT / "src" / "generator.py").read_text() + (ROOT / "src" / "neo4j_etl.py").read_text()
     flags = set(re.findall(r"--[a-z][a-z-]+", text)) - {"--now", "--user", "--basedir", "--datadir",
-                                                          "--python", "--silent", "--env-only"}
+                                                          "--python", "--silent", "--env-only", "--wait"}
     assert {f for f in flags if f not in code} == set()                 # every documented option exists
     headings = {re.sub(r"[^\w\- ]", "", h.lower()).strip().replace(" ", "-")
                 for h in re.findall(r"^#{1,4} (.+)$", text, re.M)}
-    assert {l for l in re.findall(r"\]\(#([^)]+)\)", text) if l not in headings} == set()   # no dead links
+    assert {a for a in re.findall(r"\]\(#([^)]+)\)", text) if a not in headings} == set()   # no dead links
     assert text.count("<details>") == text.count("</details>") and text.count("```") % 2 == 0
     for rel in re.findall(r"`((?:src|sql|cypher|app|tools|docker)/[\w./]+\.\w+)`", text):
         if "..." in rel:                       # placeholders like sql/05_...sql are examples, not files
